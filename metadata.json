@@ -1,0 +1,8 @@
+{
+  "name": "Bhagavad Gita quiz Live",
+  "description": "A Slido-inspired live interactive quiz platform with real-time leaderboard, admin dashboard, and participant mobile view.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": []
+}
