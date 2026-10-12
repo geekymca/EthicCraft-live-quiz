@@ -5,6 +5,7 @@ import { Quiz, LiveSession, SessionStatus } from '../types';
 import LiveAdminSession from './LiveAdminSession';
 import { createRoom, fetchQuizzesFromFirebase, deleteQuizFromFirebase, syncAllRooms, deleteRoom } from '../services/syncService';
 import { QRCodeSVG } from 'qrcode.react';
+import { getBaseUrl, getRoomJoinUrl } from '../utils/urlHelper';
 
 interface AdminDashboardProps {
   onEditQuiz: (id: string) => void;
@@ -24,7 +25,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onEditQuiz, onExit, the
   const [showCode, setShowCode] = useState(false);
 
   const ADMIN_PASSCODE = "0108"; 
-  const BASE_URL = 'https://sankalp-3.web.app';
+  const BASE_URL = getBaseUrl();
 
   useEffect(() => {
     const loadQuizzes = async () => {
@@ -349,7 +350,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onEditQuiz, onExit, the
               <div className="p-8 bg-slate-50 dark:bg-white rounded-[40px] shadow-xl border-8 border-indigo-600/10">
                 <QRCodeSVG 
                   id="portal-qr"
-                  value={`${BASE_URL}?room=${portalQuiz.roomCode}`} 
+                  value={getRoomJoinUrl(portalQuiz.roomCode)} 
                   size={240} 
                   fgColor="#020617" 
                 />

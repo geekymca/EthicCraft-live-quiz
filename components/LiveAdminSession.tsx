@@ -6,6 +6,7 @@ import { LiveSession, Quiz, SessionStatus, Participant } from '../types';
 import { syncSession, syncParticipants, updateRoomState } from '../services/syncService';
 import { sortLeaderboard, getCorrectAnswerCount, formatScoreSummary } from '../services/scoringService';
 import ThreeLeaderboardEffect from './ThreeLeaderboardEffect';
+import { getBaseUrl, getDisplayDomain, getRoomJoinUrl } from '../utils/urlHelper';
 
 interface LiveAdminSessionProps {
   session: LiveSession;
@@ -24,7 +25,8 @@ const LiveAdminSession: React.FC<LiveAdminSessionProps> = ({ session: initialSes
   const timerIntervalRef = useRef<any>(null);
   const autoAdvanceTimerRef = useRef<any>(null);
 
-  const BASE_URL = 'https://sankalp-3.web.app';
+  const BASE_URL = getBaseUrl();
+  const displayDomain = getDisplayDomain();
 
   useEffect(() => {
     const unsubscribe = syncSession(session.roomCode, (data) => {
@@ -183,7 +185,7 @@ const LiveAdminSession: React.FC<LiveAdminSessionProps> = ({ session: initialSes
                 <div className="text-center md:text-left space-y-10">
                   <h2 className="text-6xl md:text-8xl font-black tracking-tighter leading-none bg-gradient-to-br from-white to-slate-400 bg-clip-text text-transparent">Ready to play?</h2>
                   <div className="space-y-4">
-                    <p className="text-2xl text-slate-400 font-medium">Join at <span className="text-indigo-400 font-black">sankalp-3.web.app</span></p>
+                    <p className="text-2xl text-slate-400 font-medium">Join at <span className="text-indigo-400 font-black">{displayDomain || 'this site'}</span></p>
                     <div className="inline-block px-12 py-8 bg-indigo-600 rounded-[40px] text-8xl font-black shadow-2xl shadow-indigo-600/40 tracking-tight">
                       {session.roomCode}
                     </div>
@@ -199,7 +201,7 @@ const LiveAdminSession: React.FC<LiveAdminSessionProps> = ({ session: initialSes
                 </div>
                 <div className="flex flex-col items-center gap-8">
                   <div className="p-10 bg-white rounded-[60px] shadow-2xl border-[16px] border-indigo-600/10">
-                    <QRCodeSVG value={`${BASE_URL}?room=${session.roomCode}`} size={320} fgColor="#020617" />
+                    <QRCodeSVG value={getRoomJoinUrl(session.roomCode)} size={320} fgColor="#020617" />
                   </div>
                   <p className="text-slate-500 font-black uppercase tracking-widest text-xs">Scan to Join Arena</p>
                 </div>
