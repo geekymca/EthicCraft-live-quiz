@@ -3,6 +3,7 @@ import { Send, Users, Timer, CheckCircle2, XCircle, ArrowLeft, Wifi, UserCheck, 
 import { LiveSession, SessionStatus, Participant, Quiz } from '../types';
 import { addParticipantToRoom, updateParticipantInRoom, checkRoomExists, fetchQuizzesFromFirebase, getRoomState, getParticipantsOnce } from '../services/syncService';
 import { calculateRoundPoints, getCorrectAnswerCount, getSpeedBonusTotal, sortLeaderboard, formatScoreSummary } from '../services/scoringService';
+import { signInWithGoogle, signOutUser, subscribeToAuth, getStoredAuthUser, UserProfile } from '../services/authService';
 import ThreeAnswerEffect, { ThreeAnswerEffectHandle } from './ThreeAnswerEffect';
 import ThreeLeaderboardEffect from './ThreeLeaderboardEffect';
 
@@ -55,8 +56,9 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
   const [timeLeft, setTimeLeft] = useState(0);
   const [rejoinNotice, setRejoinNotice] = useState<string | null>(null);
 
-  // displayScore lags DB until reveal / intermission
   const [displayScore, setDisplayScore] = useState(0);
+  const [firebaseUser, setFirebaseUser] = useState<UserProfile | null>(() => getStoredAuthUser());
+  const [isSigningIn, setIsSigningIn] = useState(false);
 
   const timerRef = useRef<any>(null);
   const pollingRef = useRef<any>(null);
@@ -84,6 +86,25 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
       });
     }
   }, []);
+
+  // Firebase Auth state listener
+  useEffect(() => {
+    const unsub = subscribeToAuth((user) => {
+      setFirebaseUser(user);
+      if (user) {
+        if (user.displayName) setName(user.displayName);
+        if (!rollNumber) {
+          const savedProfile = localStorage.getItem('participant_profile');
+          let savedRoll = '';
+          if (savedProfile) {
+            try { savedRoll = JSON.parse(savedProfile).rollNumber; } catch (e) {}
+          }
+          setRollNumber(savedRoll || user.uid.slice(-4).toUpperCase());
+        }
+      }
+    });
+    return () => unsub();
+  }, [rollNumber]);
 
   // Polling room state
   useEffect(() => {
@@ -195,15 +216,31 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     }
   }, [timeLeft, session?.status, selectedOption, isSubmitted]);
 
-  // Quick Google Sign-In / Account fill
-  const handleGoogleLogin = () => {
-    const promptName = prompt("Sign in with Google: Enter your display name or Google Email", name || "Arjuna");
-    if (promptName && promptName.trim()) {
-      const cleanName = promptName.split('@')[0].trim();
-      const cleanRoll = rollNumber || `${Math.floor(100 + Math.random() * 900)}`;
-      setName(cleanName);
-      setRollNumber(cleanRoll);
-      localStorage.setItem('participant_profile', JSON.stringify({ name: cleanName, rollNumber: cleanRoll }));
+  // Real Firebase Google Sign-In with popup
+  const handleGoogleSignIn = async () => {
+    setIsSigningIn(true);
+    try {
+      const profile = await signInWithGoogle();
+      setFirebaseUser(profile);
+      if (profile.displayName) setName(profile.displayName);
+      if (!rollNumber) {
+        setRollNumber(profile.uid.slice(-4).toUpperCase());
+      }
+    } catch (err: any) {
+      if (err?.code !== 'auth/popup-closed-by-user') {
+        alert("Google sign-in could not be completed. You can still enter as Guest!");
+      }
+    } finally {
+      setIsSigningIn(false);
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    try {
+      await signOutUser();
+      setFirebaseUser(null);
+    } catch (err) {
+      console.warn("Sign out failed", err);
     }
   };
 
@@ -347,24 +384,61 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
           </div>
 
           <div className="bg-white dark:bg-slate-900 p-8 rounded-[40px] shadow-2xl space-y-4 border border-white/10">
-            {/* Quick Google Sign In */}
-            <button
-              onClick={handleGoogleLogin}
-              type="button"
-              className="w-full py-3.5 px-4 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700/80 border border-slate-200 dark:border-slate-700 rounded-2xl flex items-center justify-center gap-3 text-xs font-black text-slate-700 dark:text-slate-200 transition-all shadow-sm"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24">
-                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
-                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
-              </svg>
-              <span>{name ? `Signed in as ${name}` : 'Quick Auto-Fill with Google Profile'}</span>
-            </button>
+            {/* Google Authentication (with Guest fallback) */}
+            {firebaseUser ? (
+              <div className="p-4 bg-emerald-50 dark:bg-emerald-950/30 border-2 border-emerald-500/30 rounded-2xl flex items-center justify-between gap-3 shadow-sm">
+                <div className="flex items-center gap-3">
+                  {firebaseUser.photoURL ? (
+                    <img 
+                      src={firebaseUser.photoURL} 
+                      alt={firebaseUser.displayName || 'User'} 
+                      className="w-11 h-11 rounded-full border-2 border-emerald-500 object-cover shadow-sm" 
+                    />
+                  ) : (
+                    <div className="w-11 h-11 rounded-full bg-emerald-600 text-white font-black flex items-center justify-center text-sm shadow-sm">
+                      {(firebaseUser.displayName || 'G').charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="leading-tight">
+                    <div className="flex items-center gap-1.5 font-black text-xs text-slate-900 dark:text-white">
+                      <span>{firebaseUser.displayName}</span>
+                      <span className="text-[9px] text-emerald-700 dark:text-emerald-300 font-bold bg-emerald-200 dark:bg-emerald-900/60 px-1.5 py-0.5 rounded-full">
+                        ✓ Google Verified
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-500 truncate max-w-[180px] mt-0.5">{firebaseUser.email}</div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleGoogleSignOut}
+                  className="text-[10px] font-black text-slate-400 hover:text-red-500 uppercase tracking-wider px-2.5 py-1.5 rounded-xl hover:bg-white dark:hover:bg-slate-800 transition-colors"
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={handleGoogleSignIn}
+                disabled={isSigningIn}
+                type="button"
+                className="w-full py-4 px-4 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/80 border-2 border-slate-200 dark:border-slate-700 rounded-2xl flex items-center justify-center gap-3 text-xs font-black text-slate-800 dark:text-white transition-all shadow-sm active:scale-95 disabled:opacity-50"
+              >
+                <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                </svg>
+                <span>{isSigningIn ? 'Connecting to Google...' : 'Sign in with Google'}</span>
+              </button>
+            )}
 
             <div className="relative flex py-1 items-center">
               <div className="flex-grow border-t border-slate-100 dark:border-slate-800"></div>
-              <span className="flex-shrink mx-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Or Enter Details</span>
+              <span className="flex-shrink mx-3 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                {firebaseUser ? 'Participant Room Details' : 'Or Enter Details as Guest'}
+              </span>
               <div className="flex-grow border-t border-slate-100 dark:border-slate-800"></div>
             </div>
 
@@ -474,11 +548,22 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
           >
             <ArrowLeft size={18} />
           </button>
-          <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-black text-sm">
-            {name.charAt(0).toUpperCase()}
-          </div>
+          {firebaseUser?.photoURL ? (
+            <img 
+              src={firebaseUser.photoURL} 
+              alt={name} 
+              className="w-9 h-9 rounded-xl object-cover border-2 border-indigo-400 shadow-sm" 
+            />
+          ) : (
+            <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-black text-sm">
+              {name.charAt(0).toUpperCase()}
+            </div>
+          )}
           <div className="leading-tight">
-            <span className="font-black text-slate-900 dark:text-white block text-sm">{name}</span>
+            <div className="flex items-center gap-1">
+              <span className="font-black text-slate-900 dark:text-white block text-sm">{name}</span>
+              {firebaseUser && <span className="text-[9px] text-emerald-500 font-bold" title="Google Verified">✓</span>}
+            </div>
             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">#{rollNumber}</span>
           </div>
         </div>
