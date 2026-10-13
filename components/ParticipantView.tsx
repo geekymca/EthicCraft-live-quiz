@@ -58,6 +58,12 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
   const [isLoading, setIsLoading] = useState(false);
   const [timeLeft, setTimeLeft] = useState(0);
   const [rejoinNotice, setRejoinNotice] = useState<string | null>(null);
+  const [myParticipantId, setMyParticipantId] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('myParticipantId') || '';
+    }
+    return '';
+  });
 
   const [displayScore, setDisplayScore] = useState(0);
 
@@ -65,7 +71,7 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
   const pollingRef = useRef<any>(null);
   const answerEffectRef = useRef<ThreeAnswerEffectHandle | null>(null);
 
-  // Auto-resume check: Maintain session ONLY while active; if finished, discard stale cache
+  // Auto-resume check on initial load
   useEffect(() => {
     const savedRoom = localStorage.getItem('active_quiz_room');
     const savedId = localStorage.getItem('myParticipantId');
@@ -84,6 +90,7 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
           setRoomCode(savedRoom);
           setName(found.name);
           setPhoneNumber(found.phone_number || found.roll_number || '');
+          setMyParticipantId(found.id);
           setDisplayScore(found.score);
           setIsJoined(true);
           setRejoinNotice(`Welcome back, ${found.name}! Reconnected to active session.`);
@@ -96,14 +103,6 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     }
   }, []);
 
-  // When session completes, wipe cached active room and participant ID so subsequent sessions start fresh
-  useEffect(() => {
-    if (session?.status === SessionStatus.FINISHED) {
-      localStorage.removeItem('active_quiz_room');
-      localStorage.removeItem('myParticipantId');
-    }
-  }, [session?.status]);
-
   // Polling room state
   useEffect(() => {
     if (isJoined && roomCode) {
@@ -111,12 +110,6 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
         try {
           const newState = await getRoomState(roomCode);
           if (newState) {
-            // If room transitioned to FINISHED, clear persistent session key
-            if (newState.status === SessionStatus.FINISHED) {
-              localStorage.removeItem('active_quiz_room');
-              localStorage.removeItem('myParticipantId');
-            }
-
             setSession(prev => {
               const shouldFetchParticipants = !prev || 
                 prev.status !== newState.status || 
@@ -274,7 +267,8 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
         await addParticipantToRoom(code, participant);
       }
 
-      // Save to localStorage for reconnection during this active quiz
+      // Save to localStorage and state for reconnection during this active quiz
+      setMyParticipantId(participantId);
       localStorage.setItem('myParticipantId', participantId);
       localStorage.setItem('active_quiz_room', code);
       localStorage.setItem('participant_profile', JSON.stringify({ name: name.trim(), phoneNumber: cleanPhone }));
@@ -450,12 +444,19 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     );
   }
 
-  const myId = localStorage.getItem('myParticipantId');
-  const me = participants.find(p => p.id === myId);
+  const cleanPhone = phoneNumber.replace(/[\s\-()]/g, '').trim();
+  const myId = myParticipantId || (typeof window !== 'undefined' ? localStorage.getItem('myParticipantId') || '' : '');
+  const me = participants.find(p => 
+    (myId && p.id === myId) || 
+    (cleanPhone && p.phone_number && p.phone_number.replace(/[\s\-()]/g, '') === cleanPhone) ||
+    (cleanPhone && p.roll_number && p.roll_number.replace(/[\s\-()]/g, '') === cleanPhone) ||
+    (name && p.name === name)
+  );
+  const activeMyId = me ? me.id : myId;
   const sortedParticipants = sortLeaderboard(participants);
-  const myRank = sortedParticipants.findIndex(p => p.id === myId) + 1;
+  const myRank = activeMyId ? Math.max(1, sortedParticipants.findIndex(p => p.id === activeMyId) + 1) : (sortedParticipants.length > 0 ? 1 : '--');
   const currentQuestion = quiz.questions[session.currentQuestionIndex];
-  const myCorrectCount = me ? getCorrectAnswerCount(displayScore) : 0;
+  const myCorrectCount = me ? getCorrectAnswerCount(me.score) : getCorrectAnswerCount(displayScore);
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col transition-colors duration-300 relative">
@@ -664,22 +665,106 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
             <div className="flex-grow flex flex-col items-center justify-center text-center space-y-8 py-8 animate-in zoom-in">
               <ThreeLeaderboardEffect isGrandFinale={true} className="w-full h-48" />
 
-              <h2 className="text-4xl md:text-5xl font-black text-indigo-500 uppercase tracking-tight italic">
-                Final Honor
-              </h2>
+              <div className="space-y-1">
+                <span className="text-xs font-black text-indigo-500 uppercase tracking-widest">Arena Concluded</span>
+                <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white uppercase tracking-tight italic">
+                  Final Honor & Standings
+                </h2>
+              </div>
 
-              <div className="w-full max-w-sm p-10 bg-indigo-600 rounded-[48px] text-white shadow-2xl space-y-4">
-                 <div className="text-indigo-200 font-black uppercase tracking-[0.3em] text-[10px]">FINAL RANK</div>
-                 <div className="text-8xl font-black leading-none tracking-tighter">#{myRank}</div>
-                 <div className="text-indigo-100 font-bold text-lg">
-                   {myCorrectCount} of {quiz.questions.length} Correct
+              {/* Personal Rank Card */}
+              <div className="w-full max-w-md p-8 md:p-10 bg-gradient-to-br from-indigo-600 to-indigo-700 rounded-[44px] text-white shadow-2xl space-y-4 border border-indigo-400/30">
+                 <div className="flex items-center justify-between">
+                   <span className="text-indigo-200 font-black uppercase tracking-[0.25em] text-[10px]">YOUR FINAL STANDING</span>
+                   <span className="px-3 py-1 bg-white/20 rounded-full text-xs font-black uppercase tracking-wider">
+                     {myRank === 1 ? '🏆 Champion' : myRank === 2 ? '🥈 2nd Place' : myRank === 3 ? '🥉 3rd Place' : `Rank #${myRank}`}
+                   </span>
                  </div>
-                 <div className="text-xs text-indigo-200">Total Speed: {me ? me.totalTimeTaken.toFixed(1) : 0}s</div>
+                 
+                 <div className="text-7xl md:text-8xl font-black leading-none tracking-tighter text-white">
+                   #{myRank}
+                 </div>
+                 
+                 <div className="text-lg font-black text-indigo-100">
+                   {name} {phoneNumber && <span className="text-xs text-indigo-200 font-normal">({phoneNumber})</span>}
+                 </div>
+
+                 <div className="pt-2 grid grid-cols-2 gap-3 border-t border-white/20 text-left">
+                   <div className="p-3 bg-white/10 rounded-2xl">
+                     <span className="text-[9px] uppercase tracking-wider text-indigo-200 font-black block">Correct Answers</span>
+                     <span className="text-xl font-black text-white">{myCorrectCount} / {quiz.questions.length}</span>
+                   </div>
+                   <div className="p-3 bg-white/10 rounded-2xl">
+                     <span className="text-[9px] uppercase tracking-wider text-indigo-200 font-black block">Total Speed</span>
+                     <span className="text-xl font-black text-white">{me ? me.totalTimeTaken.toFixed(1) : '0.0'}s</span>
+                   </div>
+                 </div>
+              </div>
+
+              {/* Complete Arena Final Leaderboard */}
+              <div className="w-full max-w-md space-y-3 text-left">
+                <div className="flex items-center justify-between px-2">
+                  <h4 className="text-xs font-black uppercase tracking-widest text-slate-400">All Warriors ({participants.length})</h4>
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Ranked by Wisdom</span>
+                </div>
+
+                <div className="space-y-2.5">
+                  {sortedParticipants.map((p, i) => {
+                    const isMe = p.id === activeMyId || (cleanPhone && (p.phone_number === cleanPhone || p.roll_number === cleanPhone));
+                    const pCorrect = getCorrectAnswerCount(p.score);
+
+                    return (
+                      <div 
+                        key={p.id}
+                        className={`flex items-center justify-between p-4 rounded-2xl border text-sm font-black transition-all ${
+                          isMe 
+                            ? 'bg-indigo-50 dark:bg-indigo-950/50 border-2 border-indigo-500 text-indigo-900 dark:text-indigo-200 shadow-md scale-[1.01]' 
+                            : 'bg-white dark:bg-slate-900 border-slate-100 dark:border-slate-800 text-slate-800 dark:text-slate-200 shadow-sm'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className={`w-8 h-8 rounded-xl flex items-center justify-center text-xs font-black ${
+                            i === 0 ? 'bg-amber-400 text-slate-950 shadow-md' :
+                            i === 1 ? 'bg-slate-300 text-slate-950 shadow-md' :
+                            i === 2 ? 'bg-amber-700 text-white shadow-md' :
+                            'bg-slate-100 dark:bg-slate-800 text-slate-500'
+                          }`}>
+                            #{i + 1}
+                          </span>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span>{p.name}</span>
+                              {isMe && (
+                                <span className="text-[9px] px-2 py-0.5 bg-indigo-600 text-white rounded-md font-black">
+                                  YOU
+                                </span>
+                              )}
+                            </div>
+                            {(p.phone_number || p.roll_number) && (
+                              <span className="text-[10px] text-slate-400 font-normal block">
+                                {p.phone_number || p.roll_number}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="text-right">
+                          <span className="text-indigo-600 dark:text-indigo-400 block tabular-nums">
+                            {pCorrect} / {quiz.questions.length} Correct
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-normal">
+                            {p.totalTimeTaken.toFixed(1)}s
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               <button 
                 onClick={handleExitRoom} 
-                className="px-10 py-5 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-black rounded-2xl shadow-xl uppercase tracking-widest text-xs hover:scale-105 active:scale-95 transition-all border border-slate-200 dark:border-slate-800"
+                className="px-12 py-5 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-2xl shadow-xl uppercase tracking-widest text-xs active:scale-95 transition-all mt-4"
               >
                 Return to Home
               </button>
