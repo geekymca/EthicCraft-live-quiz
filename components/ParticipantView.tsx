@@ -1,18 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Users, Timer, CheckCircle2, XCircle, ArrowLeft, Wifi, UserCheck, CreditCard, Target, Trophy, Medal, Hash, User, RefreshCw, Check, Lock, LogIn } from 'lucide-react';
+import { Send, Users, Timer, CheckCircle2, XCircle, ArrowLeft, Wifi, Phone, Target, Trophy, Medal, Hash, User, RefreshCw, Check, Lock } from 'lucide-react';
 import { LiveSession, SessionStatus, Participant, Quiz } from '../types';
 import { addParticipantToRoom, updateParticipantInRoom, checkRoomExists, fetchQuizzesFromFirebase, getRoomState, getParticipantsOnce } from '../services/syncService';
-import { calculateRoundPoints, getCorrectAnswerCount, getSpeedBonusTotal, sortLeaderboard, formatScoreSummary } from '../services/scoringService';
-import { 
-  signInWithGoogle, 
-  signInWithGoogleRedirect, 
-  checkRedirectAuth, 
-  signOutUser, 
-  subscribeToAuth, 
-  getStoredAuthUser, 
-  getAuthErrorMessage,
-  UserProfile 
-} from '../services/authService';
+import { calculateRoundPoints, getCorrectAnswerCount, sortLeaderboard } from '../services/scoringService';
 import ThreeAnswerEffect, { ThreeAnswerEffectHandle } from './ThreeAnswerEffect';
 import ThreeLeaderboardEffect from './ThreeLeaderboardEffect';
 
@@ -40,11 +30,15 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     return '';
   });
 
-  const [rollNumber, setRollNumber] = useState(() => {
+  // Primary key identifier: Phone Number
+  const [phoneNumber, setPhoneNumber] = useState(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('participant_profile');
       if (saved) {
-        try { return JSON.parse(saved).rollNumber || ''; } catch (e) {}
+        try { 
+          const parsed = JSON.parse(saved);
+          return parsed.phoneNumber || parsed.rollNumber || ''; 
+        } catch (e) {}
       }
     }
     return '';
@@ -55,7 +49,7 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
   const [quiz, setQuiz] = useState<Quiz | null>(null);
   const [participants, setParticipants] = useState<Participant[]>([]);
   
-  // Choice selection state (User can freely change selection until timer ends)
+  // Choice selection state (Locks immediately on selection)
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
   const [selectionTimeTaken, setSelectionTimeTaken] = useState<number | null>(null);
   const [isSubmitted, setIsSubmitted] = useState(false);
@@ -66,68 +60,49 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
   const [rejoinNotice, setRejoinNotice] = useState<string | null>(null);
 
   const [displayScore, setDisplayScore] = useState(0);
-  const [firebaseUser, setFirebaseUser] = useState<UserProfile | null>(() => getStoredAuthUser());
-  const [isSigningIn, setIsSigningIn] = useState(false);
-  const [authError, setAuthError] = useState<{ title: string; message: string; fixStep?: string } | null>(null);
 
   const timerRef = useRef<any>(null);
   const pollingRef = useRef<any>(null);
   const answerEffectRef = useRef<ThreeAnswerEffectHandle | null>(null);
 
-  // Check redirect sign-in result on mount
-  useEffect(() => {
-    checkRedirectAuth().then((profile) => {
-      if (profile) {
-        setFirebaseUser(profile);
-        if (profile.displayName) setName(profile.displayName);
-        if (!rollNumber) {
-          setRollNumber(profile.uid.slice(-4).toUpperCase());
-        }
-      }
-    });
-  }, []);
-
-  // Auto-resume check if player refreshed or rejoined with existing credentials
+  // Auto-resume check: Maintain session ONLY while active; if finished, discard stale cache
   useEffect(() => {
     const savedRoom = localStorage.getItem('active_quiz_room');
     const savedId = localStorage.getItem('myParticipantId');
     if (savedRoom && savedId && !isJoined) {
-      // Check if session can be restored
       getRoomState(savedRoom).then(async (state) => {
-        if (state) {
-          const list = await getParticipantsOnce(savedRoom);
-          const found = list.find((p: any) => p.id === savedId);
-          if (found) {
-            setRoomCode(savedRoom);
-            setName(found.name);
-            setRollNumber(found.roll_number);
-            setDisplayScore(found.score);
-            setIsJoined(true);
-            setRejoinNotice(`Welcome back, ${found.name}! Session restored.`);
-          }
+        // Discard session if room does not exist or has finished
+        if (!state || state.status === SessionStatus.FINISHED) {
+          localStorage.removeItem('active_quiz_room');
+          localStorage.removeItem('myParticipantId');
+          return;
+        }
+
+        const list = await getParticipantsOnce(savedRoom);
+        const found = list.find((p: any) => p.id === savedId);
+        if (found) {
+          setRoomCode(savedRoom);
+          setName(found.name);
+          setPhoneNumber(found.phone_number || found.roll_number || '');
+          setDisplayScore(found.score);
+          setIsJoined(true);
+          setRejoinNotice(`Welcome back, ${found.name}! Reconnected to active session.`);
+        } else {
+          // Stale ID from prior quiz run
+          localStorage.removeItem('active_quiz_room');
+          localStorage.removeItem('myParticipantId');
         }
       });
     }
   }, []);
 
-  // Firebase Auth state listener
+  // When session completes, wipe cached active room and participant ID so subsequent sessions start fresh
   useEffect(() => {
-    const unsub = subscribeToAuth((user) => {
-      setFirebaseUser(user);
-      if (user) {
-        if (user.displayName) setName(user.displayName);
-        if (!rollNumber) {
-          const savedProfile = localStorage.getItem('participant_profile');
-          let savedRoll = '';
-          if (savedProfile) {
-            try { savedRoll = JSON.parse(savedProfile).rollNumber; } catch (e) {}
-          }
-          setRollNumber(savedRoll || user.uid.slice(-4).toUpperCase());
-        }
-      }
-    });
-    return () => unsub();
-  }, [rollNumber]);
+    if (session?.status === SessionStatus.FINISHED) {
+      localStorage.removeItem('active_quiz_room');
+      localStorage.removeItem('myParticipantId');
+    }
+  }, [session?.status]);
 
   // Polling room state
   useEffect(() => {
@@ -136,6 +111,12 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
         try {
           const newState = await getRoomState(roomCode);
           if (newState) {
+            // If room transitioned to FINISHED, clear persistent session key
+            if (newState.status === SessionStatus.FINISHED) {
+              localStorage.removeItem('active_quiz_room');
+              localStorage.removeItem('myParticipantId');
+            }
+
             setSession(prev => {
               const shouldFetchParticipants = !prev || 
                 prev.status !== newState.status || 
@@ -145,7 +126,8 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
                 getParticipantsOnce(roomCode).then(list => {
                   const mapped = list.map(p => ({
                     ...p,
-                    rollNumber: p.roll_number,
+                    phoneNumber: p.phone_number || p.roll_number,
+                    rollNumber: p.phone_number || p.roll_number,
                     totalTimeTaken: p.total_time_taken,
                     lastTimeTaken: p.last_time_taken,
                     lastAnsweredCorrectly: p.last_answered_correctly,
@@ -229,100 +211,60 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     }
   }, [session?.currentQuestionIndex, session?.status, quiz, participants]);
 
-  // AUTO-SUBMIT: When timer hits 0 (or when host reveals result), if an option is selected but not submitted, submit it now!
-  useEffect(() => {
-    if ((timeLeft === 0 || session?.status === SessionStatus.REVEAL) && 
-        selectedOption !== null && 
-        !isSubmitted && 
-        session?.status === SessionStatus.ACTIVE) {
-      finalizeSubmitAnswer(selectedOption, selectionTimeTaken);
-    }
-  }, [timeLeft, session?.status, selectedOption, isSubmitted]);
-
-  // Real Firebase Google Sign-In with popup & redirect fallback
-  const handleGoogleSignIn = async () => {
-    setIsSigningIn(true);
-    setAuthError(null);
-    try {
-      const profile = await signInWithGoogle();
-      setFirebaseUser(profile);
-      if (profile.displayName) setName(profile.displayName);
-      if (!rollNumber) {
-        setRollNumber(profile.uid.slice(-4).toUpperCase());
-      }
-    } catch (err: any) {
-      if (err?.code !== 'auth/popup-closed-by-user') {
-        const diagnostic = getAuthErrorMessage(err);
-        setAuthError(diagnostic);
-      }
-    } finally {
-      setIsSigningIn(false);
-    }
-  };
-
-  const handleGoogleSignInRedirect = async () => {
-    setIsSigningIn(true);
-    setAuthError(null);
-    try {
-      await signInWithGoogleRedirect();
-    } catch (err: any) {
-      const diagnostic = getAuthErrorMessage(err);
-      setAuthError(diagnostic);
-      setIsSigningIn(false);
-    }
-  };
-
-  const handleGoogleSignOut = async () => {
-    try {
-      await signOutUser();
-      setFirebaseUser(null);
-      setAuthError(null);
-    } catch (err) {
-      console.warn("Sign out failed", err);
-    }
-  };
-
+  // Join or reconnect to live session using Phone Number as primary key
   const joinSession = async () => {
     const code = roomCode.toUpperCase().trim();
-    if (!code || !name.trim() || !rollNumber.trim()) {
-      return alert("Room Code, Name, and ID Number are required!");
+    const cleanPhone = phoneNumber.replace(/[\s\-()]/g, '').trim();
+
+    if (!code || !name.trim() || !cleanPhone) {
+      return alert("Room Code, Name, and Phone Number are required!");
+    }
+
+    if (cleanPhone.length < 6) {
+      return alert("Please enter a valid Phone Number!");
     }
     
     setIsLoading(true);
     try {
-      const exists = await checkRoomExists(code);
-      if (!exists) {
+      const room = await getRoomState(code);
+      if (!room) {
         alert("Room Code not found! Please verify the code.");
         setIsLoading(false);
         return;
       }
 
-      // Check if this participant already exists in the room (rejoin logic)
+      if (room.status === SessionStatus.FINISHED) {
+        alert("This quiz session has already finished. Please ask the host to start a new quiz.");
+        setIsLoading(false);
+        return;
+      }
+
+      // Check if participant exists in this room by Phone Number (primary key for active quiz)
       const existingParticipants = await getParticipantsOnce(code);
-      const cleanRoll = rollNumber.trim().toUpperCase();
       const storedId = localStorage.getItem('myParticipantId');
 
-      const existingPlayer = existingParticipants.find((p: any) => 
-        (storedId && p.id === storedId) || 
-        (p.roll_number && p.roll_number.toUpperCase() === cleanRoll)
-      );
+      const existingPlayer = existingParticipants.find((p: any) => {
+        const pPhone = (p.phone_number || p.roll_number || '').replace(/[\s\-()]/g, '');
+        return (storedId && p.id === storedId) || (pPhone && pPhone === cleanPhone);
+      });
 
       let participantId: string;
 
       if (existingPlayer) {
-        // RECONNECT TO EXISTING PROFILE
+        // Reconnect to active running quiz session
         participantId = existingPlayer.id;
         setName(existingPlayer.name);
-        setRollNumber(existingPlayer.roll_number);
+        setPhoneNumber(existingPlayer.phone_number || existingPlayer.roll_number || cleanPhone);
         setDisplayScore(existingPlayer.score);
-        setRejoinNotice(`Reconnected! Restored your previous standing.`);
+        setRejoinNotice(`Reconnected! Restored active session standing.`);
       } else {
-        // NEW PARTICIPANT REGISTRATION
+        // Register new participant
         participantId = Math.random().toString(36).substring(2, 9);
         const participant: Participant = {
           id: participantId,
           name: name.trim(),
-          rollNumber: cleanRoll,
+          phoneNumber: cleanPhone,
+          rollNumber: cleanPhone,
           score: 0,
           totalTimeTaken: 0,
           lastTimeTaken: 0,
@@ -332,10 +274,10 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
         await addParticipantToRoom(code, participant);
       }
 
-      // Save persistent profile & session for future re-entries
+      // Save to localStorage for reconnection during this active quiz
       localStorage.setItem('myParticipantId', participantId);
       localStorage.setItem('active_quiz_room', code);
-      localStorage.setItem('participant_profile', JSON.stringify({ name: name.trim(), rollNumber: cleanRoll }));
+      localStorage.setItem('participant_profile', JSON.stringify({ name: name.trim(), phoneNumber: cleanPhone }));
 
       setIsJoined(true);
     } catch (error) {
@@ -346,30 +288,33 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     }
   };
 
-  // Option selection handler - User can freely select and change until timer expires
+  // Reverted: Immediate lock-in on selection (cannot be changed once tapped)
   const handleSelectOption = (idx: number, event?: React.MouseEvent) => {
     if (isSubmitted || !session || session.status !== SessionStatus.ACTIVE || timeLeft === 0) return;
 
     setSelectedOption(idx);
+    setIsSubmitted(true); // Locked immediately!
+
     const elapsed = session.startTime ? Math.max(0.5, (Date.now() - session.startTime) / 1000) : 1;
     setSelectionTimeTaken(elapsed);
 
-    // Trigger dynamic 3D sparkle effect at click coordinates
+    // Trigger dynamic 3D sparkle effect at touch/click coordinates
     if (event && answerEffectRef.current) {
       answerEffectRef.current.triggerBurst(event.clientX, event.clientY, 0x6366f1);
     }
+
+    // Immediately submit to database
+    finalizeSubmitAnswer(idx, elapsed);
   };
 
-  // Finalize submission (either manually locked in or auto-submitted when timer hits 0)
+  // Finalize answer submission to database
   const finalizeSubmitAnswer = async (optionIdx: number, userTimeTaken: number | null) => {
-    if (isSubmitted || !session || !session.startTime || !quiz) return;
+    if (!session || !session.startTime || !quiz) return;
 
-    setIsSubmitted(true);
     const myId = localStorage.getItem('myParticipantId') || '';
     const question = quiz.questions[session.currentQuestionIndex];
     if (!question) return;
 
-    // Time calculation: if user picked earlier, reward that speed, otherwise time limit
     const finalTimeTaken = userTimeTaken !== null ? Math.min(question.timeLimit, userTimeTaken) : question.timeLimit;
     const isCorrect = optionIdx === question.correctAnswer;
     const points = calculateRoundPoints(isCorrect, finalTimeTaken, question.timeLimit);
@@ -394,21 +339,17 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     }
   };
 
-  const handleManualLockIn = () => {
-    if (selectedOption !== null && !isSubmitted) {
-      finalizeSubmitAnswer(selectedOption, selectionTimeTaken);
-    }
-  };
-
-  // Leave room but allow re-joining
+  // Exit room handler
   const handleExitRoom = () => {
-    if (confirm("Leave this quiz session? You can rejoin anytime with your ID!")) {
+    if (confirm("Leave this quiz session?")) {
+      localStorage.removeItem('active_quiz_room');
+      localStorage.removeItem('myParticipantId');
       setIsJoined(false);
       onExit();
     }
   };
 
-  // Render Joined Room View
+  // Render Join View
   if (!isJoined) {
     return (
       <div className="min-h-screen bg-indigo-600 dark:bg-slate-950 p-6 flex flex-col items-center justify-center relative transition-colors duration-500 overflow-hidden">
@@ -418,107 +359,10 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
                <img src="https://i.ibb.co/VYFjgzQL/icon.png" alt="Quiz Icon" className="w-full h-full object-contain" />
             </div>
             <h1 className="text-3xl md:text-4xl font-black tracking-tight">Wisdom Arena</h1>
-            <p className="text-indigo-100/80 text-sm font-medium">Join or Reconnect to Live Bhagavad Gita Quiz</p>
+            <p className="text-indigo-100/80 text-sm font-medium">Join Live Bhagavad Gita Quiz Arena</p>
           </div>
 
-          <div className="bg-white dark:bg-slate-900 p-8 rounded-[40px] shadow-2xl space-y-4 border border-white/10">
-            {/* Google Authentication (with Guest fallback) */}
-            {firebaseUser ? (
-              <div className="p-4 bg-emerald-50 dark:bg-emerald-950/30 border-2 border-emerald-500/30 rounded-2xl flex items-center justify-between gap-3 shadow-sm">
-                <div className="flex items-center gap-3">
-                  {firebaseUser.photoURL ? (
-                    <img 
-                      src={firebaseUser.photoURL} 
-                      alt={firebaseUser.displayName || 'User'} 
-                      className="w-11 h-11 rounded-full border-2 border-emerald-500 object-cover shadow-sm" 
-                    />
-                  ) : (
-                    <div className="w-11 h-11 rounded-full bg-emerald-600 text-white font-black flex items-center justify-center text-sm shadow-sm">
-                      {(firebaseUser.displayName || 'G').charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                  <div className="leading-tight">
-                    <div className="flex items-center gap-1.5 font-black text-xs text-slate-900 dark:text-white">
-                      <span>{firebaseUser.displayName}</span>
-                      <span className="text-[9px] text-emerald-700 dark:text-emerald-300 font-bold bg-emerald-200 dark:bg-emerald-900/60 px-1.5 py-0.5 rounded-full">
-                        ✓ Google Verified
-                      </span>
-                    </div>
-                    <div className="text-[10px] text-slate-500 truncate max-w-[180px] mt-0.5">{firebaseUser.email}</div>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleGoogleSignOut}
-                  className="text-[10px] font-black text-slate-400 hover:text-red-500 uppercase tracking-wider px-2.5 py-1.5 rounded-xl hover:bg-white dark:hover:bg-slate-800 transition-colors"
-                >
-                  Sign Out
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={handleGoogleSignIn}
-                disabled={isSigningIn}
-                type="button"
-                className="w-full py-4 px-4 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/80 border-2 border-slate-200 dark:border-slate-700 rounded-2xl flex items-center justify-center gap-3 text-xs font-black text-slate-800 dark:text-white transition-all shadow-sm active:scale-95 disabled:opacity-50"
-              >
-                <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
-                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
-                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
-                </svg>
-                <span>{isSigningIn ? 'Connecting to Google...' : 'Sign in with Google'}</span>
-              </button>
-            )}
-
-            {authError && (
-              <div className="p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-2xl space-y-2.5 text-xs text-amber-900 dark:text-amber-200 animate-in fade-in">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="font-black text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
-                    <span>⚠️ {authError.title}</span>
-                  </div>
-                  <button 
-                    type="button"
-                    onClick={() => setAuthError(null)}
-                    className="text-amber-500 hover:text-amber-700 font-bold text-xs"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <p className="text-[11px] leading-relaxed font-medium">{authError.message}</p>
-                {authError.fixStep && (
-                  <div className="p-2.5 bg-amber-100/70 dark:bg-amber-900/40 rounded-xl font-mono text-[10px] text-amber-950 dark:text-amber-100 break-words leading-relaxed">
-                    {authError.fixStep}
-                  </div>
-                )}
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={handleGoogleSignInRedirect}
-                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl text-[10px] shadow-sm transition-all"
-                  >
-                    Try Redirect Sign-In
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAuthError(null)}
-                    className="px-3 py-1.5 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-[10px] transition-all"
-                  >
-                    Continue as Guest
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div className="relative flex py-1 items-center">
-              <div className="flex-grow border-t border-slate-100 dark:border-slate-800"></div>
-              <span className="flex-shrink mx-3 text-[10px] font-black uppercase tracking-widest text-slate-400">
-                {firebaseUser ? 'Participant Room Details' : 'Or Enter Details as Guest'}
-              </span>
-              <div className="flex-grow border-t border-slate-100 dark:border-slate-800"></div>
-            </div>
-
+          <div className="bg-white dark:bg-slate-900 p-8 rounded-[40px] shadow-2xl space-y-5 border border-white/10">
             <div className="space-y-1">
               <label className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-3">Access Room</label>
               <div className="relative">
@@ -548,17 +392,20 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
             </div>
 
             <div className="space-y-1">
-              <label className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-3">ID / Roll Number (Used to Rejoin)</label>
+              <label className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-3">
+                Phone Number (Primary Key)
+              </label>
               <div className="relative">
-                <CreditCard className="absolute left-5 top-1/2 -translate-y-1/2 text-indigo-400" size={18} />
+                <Phone className="absolute left-5 top-1/2 -translate-y-1/2 text-indigo-400" size={18} />
                 <input 
-                  type="text" 
-                  value={rollNumber} 
-                  onChange={(e) => setRollNumber(e.target.value)} 
-                  placeholder="e.g. 108 or Roll No" 
+                  type="tel" 
+                  value={phoneNumber} 
+                  onChange={(e) => setPhoneNumber(e.target.value)} 
+                  placeholder="e.g. 9876543210" 
                   className="w-full pl-14 pr-4 py-4 bg-slate-50 dark:bg-slate-800/50 border-2 border-slate-100 dark:border-slate-800 rounded-2xl focus:border-indigo-500 outline-none font-bold transition-all dark:text-white" 
                 />
               </div>
+              <p className="text-[10px] text-slate-400 ml-3">Used as unique identifier to reconnect if disconnected</p>
             </div>
 
             <button 
@@ -573,7 +420,7 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
                 </>
               ) : (
                 <>
-                  <span>ENTER / REJOIN ARENA</span>
+                  <span>ENTER / JOIN ARENA</span>
                   <Send size={20} />
                 </>
               )}
@@ -625,23 +472,12 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
           >
             <ArrowLeft size={18} />
           </button>
-          {firebaseUser?.photoURL ? (
-            <img 
-              src={firebaseUser.photoURL} 
-              alt={name} 
-              className="w-9 h-9 rounded-xl object-cover border-2 border-indigo-400 shadow-sm" 
-            />
-          ) : (
-            <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-black text-sm">
-              {name.charAt(0).toUpperCase()}
-            </div>
-          )}
+          <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-black text-sm">
+            {name.charAt(0).toUpperCase()}
+          </div>
           <div className="leading-tight">
-            <div className="flex items-center gap-1">
-              <span className="font-black text-slate-900 dark:text-white block text-sm">{name}</span>
-              {firebaseUser && <span className="text-[9px] text-emerald-500 font-bold" title="Google Verified">✓</span>}
-            </div>
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">#{rollNumber}</span>
+            <span className="font-black text-slate-900 dark:text-white block text-sm">{name}</span>
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{phoneNumber}</span>
           </div>
         </div>
 
@@ -706,23 +542,18 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
                   {currentQuestion.text}
                 </h2>
 
-                {/* Status indicator: Changeable answer note */}
                 <div className="text-xs font-bold text-slate-500 dark:text-slate-400">
                   {isSubmitted ? (
                     <span className="text-emerald-500 font-black flex items-center justify-center gap-1">
-                      <CheckCircle2 size={16} /> Answer Locked In! Waiting for question timer...
-                    </span>
-                  ) : selectedOption !== null ? (
-                    <span className="text-indigo-600 dark:text-indigo-400 flex items-center justify-center gap-1.5">
-                      Selected: <strong>Option {String.fromCharCode(65 + selectedOption)}</strong> · You can change choice anytime until timer reaches 0!
+                      <CheckCircle2 size={16} /> Choice Locked In! Waiting for question timer...
                     </span>
                   ) : (
-                    <span>Tap any option to select your answer</span>
+                    <span>Tap your choice to submit and lock in</span>
                   )}
                 </div>
               </div>
 
-              {/* Options list */}
+              {/* Options list: Reverted to immediate lock-in on selection */}
               <div className="grid grid-cols-1 gap-4">
                 {currentQuestion.options.map((opt, idx) => {
                   const isSelected = selectedOption === idx;
@@ -736,7 +567,7 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
                         isSelected 
                           ? 'bg-indigo-600 border-indigo-400 text-white shadow-xl scale-[1.01]' 
                           : isSubmitted
-                          ? 'opacity-40 border-transparent bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                          ? 'opacity-40 border-transparent bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 cursor-not-allowed'
                           : 'bg-white dark:bg-slate-800 border-slate-100 dark:border-slate-700 text-slate-800 dark:text-slate-100 hover:border-indigo-400'
                       }`}
                     >
@@ -755,19 +586,6 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
                   );
                 })}
               </div>
-
-              {/* Optional Early Lock-In Button */}
-              {selectedOption !== null && !isSubmitted && timeLeft > 0 && (
-                <div className="pt-2 flex justify-center">
-                  <button
-                    onClick={handleManualLockIn}
-                    className="px-8 py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-black text-sm flex items-center gap-2 shadow-lg shadow-emerald-600/20 active:scale-95 transition-all"
-                  >
-                    <Lock size={16} />
-                    LOCK IN ANSWER NOW (Extra Speed Bonus)
-                  </button>
-                </div>
-              )}
             </div>
           )}
 
@@ -788,44 +606,33 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
               </div>
 
               <div className="w-full space-y-3">
-                <span className="text-slate-400 text-[10px] font-black uppercase tracking-[0.3em]">Correct Answer Was</span>
-                <div className="p-8 bg-white dark:bg-slate-900 border-2 border-emerald-500 rounded-[36px] shadow-xl">
-                   <p className="text-2xl font-black text-slate-900 dark:text-white leading-tight">
-                     {currentQuestion.options[currentQuestion.correctAnswer]}
-                   </p>
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Correct Answer:</div>
+                <div className="p-5 bg-emerald-500/10 border-2 border-emerald-500/30 text-emerald-600 dark:text-emerald-400 rounded-2xl font-black text-lg">
+                  {String.fromCharCode(65 + currentQuestion.correctAnswer)}. {currentQuestion.options[currentQuestion.correctAnswer]}
                 </div>
               </div>
+
+              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest animate-pulse">
+                Host is transitioning to standings...
+              </p>
             </div>
           )}
 
-          {/* INTERMISSION LEADERBOARD */}
+          {/* INTERMISSION / LEADERBOARD */}
           {session.status === SessionStatus.INTERMISSION && (
-            <div className="flex-grow flex flex-col items-center justify-center text-center space-y-6 py-6 animate-in slide-in-from-bottom">
-              {/* 3D Trophy / Golden Emblem Animation */}
-              <ThreeLeaderboardEffect className="w-full h-40" />
+            <div className="space-y-6 animate-in slide-in-from-bottom-8 py-6">
+              {/* 3D Trophy and celebration visual */}
+              <ThreeLeaderboardEffect isGrandFinale={false} className="w-full h-40" />
 
               <div className="text-center space-y-1">
-                <h2 className="text-3xl font-black text-slate-900 dark:text-white tracking-tight">Arena Standings</h2>
-                <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">
-                  Ranked by Maximum Correct Answers First
-                </p>
+                <span className="text-xs font-black text-indigo-500 uppercase tracking-widest">Intermission Standings</span>
+                <h3 className="text-3xl font-black text-slate-900 dark:text-white">Current Leaderboard</h3>
               </div>
 
-              {/* User Standing Card */}
-              <div className="p-8 bg-indigo-600 text-white rounded-[36px] shadow-2xl w-full relative overflow-hidden">
-                <div className="text-indigo-200 text-[10px] font-black uppercase tracking-[0.3em]">YOUR CURRENT STANDING</div>
-                <div className="text-6xl font-black tracking-tight my-2">#{myRank}</div>
-                <div className="text-indigo-100 font-bold text-sm">
-                  {myCorrectCount} Correct Answers • {me ? me.totalTimeTaken.toFixed(1) : 0}s Total Time
-                </div>
-              </div>
-
-              {/* Top 5 Standings preview */}
-              <div className="w-full space-y-2 pt-2">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 block text-left px-2">Top Warriors</span>
-                {sortedParticipants.slice(0, 5).map((p, i) => {
-                  const pCorrect = getCorrectAnswerCount(p.score);
+              <div className="space-y-3">
+                {sortedParticipants.slice(0, 10).map((p, i) => {
                   const isMe = p.id === myId;
+                  const pCorrect = getCorrectAnswerCount(p.score);
 
                   return (
                     <div 

@@ -40,7 +40,8 @@ const LiveAdminSession: React.FC<LiveAdminSessionProps> = ({ session: initialSes
     const unsubscribe = syncParticipants(session.roomCode, (list) => {
       const mapped = list.map(p => ({
         ...p,
-        rollNumber: p.roll_number,
+        phoneNumber: p.phone_number || p.roll_number,
+        rollNumber: p.phone_number || p.roll_number,
         totalTimeTaken: p.total_time_taken,
         lastTimeTaken: p.last_time_taken,
         lastAnsweredCorrectly: p.last_answered_correctly,
@@ -307,7 +308,7 @@ const LiveAdminSession: React.FC<LiveAdminSessionProps> = ({ session: initialSes
                       <div className="flex flex-col items-center md:items-start flex-grow">
                         <div className="text-3xl font-black text-white mb-1 uppercase tracking-tight group-hover:text-indigo-400 transition-colors">{p.name}</div>
                         <div className="text-slate-400 font-bold uppercase tracking-widest text-[11px]">
-                          ROLL NO: #{p.rollNumber} • ACCURACY: {accuracy}% • TIME: {p.totalTimeTaken.toFixed(1)}s
+                          PHONE: {p.phoneNumber || p.rollNumber} • ACCURACY: {accuracy}% • TIME: {p.totalTimeTaken.toFixed(1)}s
                         </div>
                       </div>
                       <div className="text-right">

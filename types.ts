@@ -19,7 +19,8 @@ export interface Quiz {
 export interface Participant {
   id: string;
   name: string;
-  rollNumber: string;
+  phoneNumber?: string;
+  rollNumber?: string; // backwards compatibility
   score: number;
   totalTimeTaken: number;
   lastTimeTaken: number; // Time taken for the most recent question

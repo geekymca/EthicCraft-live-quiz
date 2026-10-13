@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { Plus, Play, Edit2, Trash2, Users, ArrowLeft, Lock, ShieldCheck, ExternalLink, Activity, LogOut, StopCircle, QrCode, Download, Eye, EyeOff, X, Zap } from 'lucide-react';
 import { Quiz, LiveSession, SessionStatus } from '../types';
 import LiveAdminSession from './LiveAdminSession';
-import { createRoom, fetchQuizzesFromFirebase, deleteQuizFromFirebase, syncAllRooms, deleteRoom } from '../services/syncService';
+import { createRoom, fetchQuizzesFromFirebase, deleteQuizFromFirebase, syncAllRooms, deleteRoom, resetRoomParticipants, updateRoomState } from '../services/syncService';
 import { QRCodeSVG } from 'qrcode.react';
 import { getBaseUrl, getRoomJoinUrl } from '../utils/urlHelper';
 
@@ -112,6 +112,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onEditQuiz, onExit, the
       
       if (!existingRoom) {
         await createRoom(session);
+      } else {
+        await resetRoomParticipants(roomCode);
+        await updateRoomState(roomCode, { 
+          status: SessionStatus.WAITING, 
+          currentQuestionIndex: 0, 
+          startTime: null 
+        });
       }
       setActiveSession(session);
     } catch (error) {

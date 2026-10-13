@@ -165,19 +165,50 @@ export const updateRoomState = async (roomCode: string, updates: any) => {
   if (error) throw error;
 };
 
+export const resetRoomParticipants = async (roomCode: string) => {
+  await supabase.from('participants').delete().eq('room_code', roomCode);
+};
+
 export const addParticipantToRoom = async (roomCode: string, participant: any) => {
-  const { error } = await supabase.from('participants').insert({
+  const phoneVal = participant.phoneNumber || participant.rollNumber || '';
+  
+  const payload: any = {
     id: participant.id,
     room_code: roomCode,
     name: participant.name,
-    roll_number: participant.rollNumber,
+    roll_number: phoneVal,
     score: participant.score,
     total_time_taken: participant.totalTimeTaken,
     last_time_taken: participant.lastTimeTaken,
     last_answered_correctly: participant.lastAnsweredCorrectly,
     answered_question_index: participant.answeredQuestionIndex
-  });
-  if (error) throw error;
+  };
+
+  // 1. Try upsert on (room_code, phone_number) if unique constraint exists
+  try {
+    const { error } = await supabase.from('participants').upsert(
+      { ...payload, phone_number: phoneVal },
+      { onConflict: 'room_code,phone_number' }
+    );
+    if (!error) return;
+  } catch (e) {
+    // Composite conflict target might not be recognized yet
+  }
+
+  // 2. Try insert with phone_number
+  try {
+    const { error } = await supabase.from('participants').insert({
+      ...payload,
+      phone_number: phoneVal
+    });
+    if (!error) return;
+  } catch (e) {
+    // Column phone_number might not exist yet
+  }
+
+  // 3. Fallback to basic insert with roll_number
+  const { error } = await supabase.from('participants').insert(payload);
+  if (error && !error.message?.includes('duplicate key')) throw error;
 };
 
 export const updateParticipantInRoom = async (roomCode: string, participantId: string, updates: any) => {
