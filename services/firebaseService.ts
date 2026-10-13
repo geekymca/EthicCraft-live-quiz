@@ -11,7 +11,10 @@ googleProvider.setCustomParameters({
   prompt: 'select_account'
 });
 
-export const db = getFirestore(app);
+// Connect to the specific database configured in firebase-applet-config.json
+export const db = firebaseConfig.firestoreDatabaseId
+  ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
+  : getFirestore(app);
 
 // Test connection on boot per Firebase guidelines
 async function testConnection() {

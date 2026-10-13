@@ -1,73 +1,47 @@
-# Implementation Plan: Firebase Google Authentication Integration
+# Implementation Plan: Fix Firebase Deployment Blank Screen & Firestore Database Configuration
 
-Integrate real Firebase Authentication with Google Sign-In for participants, maintain guest entry fallback, and keep the existing Supabase real-time database intact.
-
----
-
-## 1. User Decisions & Architectural Alignment
-* **Authentication Scope**: Real Google Sign-In for participants via Firebase Auth (`signInWithPopup`), with seamless fallback to guest entry (manual Name + ID) for participants who prefer not to sign in.
-* **Database & Realtime Sync**: Maintain existing Supabase real-time database for rooms, participants, questions, and live score sync as selected.
-* **Hosting & Deployment Ready**: Configured for deployment to Firebase Hosting or custom domains.
+Resolve the runtime errors preventing the application from loading when deployed to Firebase Hosting (`sankalp-7b250.web.app`).
 
 ---
 
-## 2. Proposed Architecture & Workflow
+## 1. Problem Diagnostics & Root Cause Analysis
 
-```
-[ Participant Client ]
-       │
-       ├── Google Sign-In (Firebase Auth) ─────────► Firebase Authentication (OAuth)
-       │       │ (extracts name, email, avatar, UID)
-       │       ▼
-       └── Join Room / Live Score Sync ───────────► Supabase Database (Real-time WebSockets & Polling)
-```
+### Error 1: `Error: An API Key must be set when running in a browser` (Blank Screen)
+* **Root Cause**: `services/geminiService.ts` currently instantiates `new GoogleGenAI({ apiKey: process.env.API_KEY })` at the top level of the module upon bundle load.
+* When deployed on Firebase Hosting without a build-time `GEMINI_API_KEY` environment variable, `process.env.API_KEY` evaluates to `undefined`.
+* The `@google/genai` constructor throws an unhandled exception immediately upon script evaluation, crashing the entire React app before root render and leaving a blank white screen.
 
-1. **Firebase Setup & Provisioning**:
-   - Provision Firebase using the AI Studio Firebase setup flow (`ui_type: "firebase_setup"`).
-   - Add `firebase` client SDK package.
-   - Initialize Firebase client service (`services/firebaseService.ts`) reading configuration from `firebase-applet-config.json`.
-
-2. **Google Auth Service (`services/authService.ts`)**:
-   - `signInWithGoogle()`: Launches Firebase Google popup auth.
-   - `signOutUser()`: Clears auth session.
-   - `onAuthChange(callback)`: Real-time listener for auth state changes.
-   - Auto-extracts player's display name, profile photo avatar, and email to pre-fill participant details.
-
-3. **Participant View Updates (`components/ParticipantView.tsx`)**:
-   - Replace the prompt-based stub with a real Google Sign-In button adhering to Google Identity design guidelines.
-   - When signed in with Google:
-     - Displays profile chip with Google avatar, verified name, and email.
-     - Auto-populates participant name and derives clean participant ID.
-     - Offers "Sign out / Use another account" button.
-   - Guest fallback remains accessible for any user who wants to join by manually typing Name and ID without a Google account.
-   - Header shows user avatar and Google connection status during active quiz play.
-
-4. **Safety & Backward Compatibility**:
-   - Existing room codes, scoring logic, 3D animations, and Supabase real-time sync will remain unaffected.
-   - Rejoining sessions will recognize both Google UID and Roll Number.
+### Error 2: `Database '(default)' not found`
+* **Root Cause**: In `services/firebaseService.ts`, Firestore is initialized via `getFirestore(app)` without specifying the database ID.
+* The provisioned Firestore database ID in this project is `ai-studio-bhagavadgitaquiz-d263554e-f461-4092-a601-1975608e6a06` (configured in `firebase-applet-config.json` as `firestoreDatabaseId`).
+* Calling `getFirestore(app)` defaults to `(default)`, which does not exist in this project.
+* On application boot, `testConnection()` attempts to connect to `(default)` and logs failed network requests (`net::ERR_FAILED`).
 
 ---
 
-## 3. Step-by-Step Execution Plan
+## 2. Proposed Changes
 
-### Step 1: Firebase Provisioning & Dependencies
-- Launch AI Studio Firebase UI to establish project credentials.
-- Install `firebase` npm package (`install_applet_package`).
-- Create `services/firebaseService.ts` to export initialized `auth` and `googleProvider`.
+### 1. `services/geminiService.ts`: Lazy & Resilient Initialization
+- Remove top-level `new GoogleGenAI(...)` instantiation.
+- Initialize `GoogleGenAI` dynamically inside `generateQuizQuestions(topic)` only when the user explicitly clicks the "GENERATE WITH AI" button.
+- Check for `apiKey`: if absent, display a friendly toast/notification explaining that AI questions require `GEMINI_API_KEY`, but allow all manual quiz editing, JSON import, live play, and Firebase Auth to continue working without crashing the app.
 
-### Step 2: Authentication Layer
-- Create `services/authService.ts` with helper methods:
-  - `loginWithGoogle()`
-  - `logout()`
-  - `getCurrentUser()`
-  - `subscribeToAuthChanges()`
+### 2. `services/firebaseService.ts`: Pass Custom Firestore Database ID
+- Update `getFirestore(app)` to:
+  ```ts
+  export const db = firebaseConfig.firestoreDatabaseId
+    ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
+    : getFirestore(app);
+  ```
+- Update `testConnection()` to query the correct database instance, preventing `(default) not found` errors.
 
-### Step 3: UI Enhancement in `ParticipantView.tsx`
-- Replace mock prompt with real Google Sign-In button.
-- Add authenticated profile card with user avatar and email.
-- Preserve full guest entry form with one-click toggle.
-- Sync authenticated user details to `localStorage` and Supabase participant record.
+### 3. Build & Compilation Verification
+- Run `compile_applet` to verify clean build without TypeScript or bundling issues.
+- Verify production build output (`npm run build`) generates properly for Firebase deployment.
 
-### Step 4: Verification & Build
-- Verify clean compilation (`compile_applet`).
-- Test Google popup trigger and guest fallback flow.
+---
+
+## 3. Verification Plan
+1. Compile applet without errors.
+2. Confirm app loads cleanly without requiring a `GEMINI_API_KEY` to be set in the browser environment.
+3. Confirm Firestore connects to `ai-studio-bhagavadgitaquiz-d263554e-f461-4092-a601-1975608e6a06` without errors.
