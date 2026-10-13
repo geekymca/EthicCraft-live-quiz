@@ -3,7 +3,16 @@ import { Send, Users, Timer, CheckCircle2, XCircle, ArrowLeft, Wifi, UserCheck, 
 import { LiveSession, SessionStatus, Participant, Quiz } from '../types';
 import { addParticipantToRoom, updateParticipantInRoom, checkRoomExists, fetchQuizzesFromFirebase, getRoomState, getParticipantsOnce } from '../services/syncService';
 import { calculateRoundPoints, getCorrectAnswerCount, getSpeedBonusTotal, sortLeaderboard, formatScoreSummary } from '../services/scoringService';
-import { signInWithGoogle, signOutUser, subscribeToAuth, getStoredAuthUser, UserProfile } from '../services/authService';
+import { 
+  signInWithGoogle, 
+  signInWithGoogleRedirect, 
+  checkRedirectAuth, 
+  signOutUser, 
+  subscribeToAuth, 
+  getStoredAuthUser, 
+  getAuthErrorMessage,
+  UserProfile 
+} from '../services/authService';
 import ThreeAnswerEffect, { ThreeAnswerEffectHandle } from './ThreeAnswerEffect';
 import ThreeLeaderboardEffect from './ThreeLeaderboardEffect';
 
@@ -59,10 +68,24 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
   const [displayScore, setDisplayScore] = useState(0);
   const [firebaseUser, setFirebaseUser] = useState<UserProfile | null>(() => getStoredAuthUser());
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [authError, setAuthError] = useState<{ title: string; message: string; fixStep?: string } | null>(null);
 
   const timerRef = useRef<any>(null);
   const pollingRef = useRef<any>(null);
   const answerEffectRef = useRef<ThreeAnswerEffectHandle | null>(null);
+
+  // Check redirect sign-in result on mount
+  useEffect(() => {
+    checkRedirectAuth().then((profile) => {
+      if (profile) {
+        setFirebaseUser(profile);
+        if (profile.displayName) setName(profile.displayName);
+        if (!rollNumber) {
+          setRollNumber(profile.uid.slice(-4).toUpperCase());
+        }
+      }
+    });
+  }, []);
 
   // Auto-resume check if player refreshed or rejoined with existing credentials
   useEffect(() => {
@@ -216,9 +239,10 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     }
   }, [timeLeft, session?.status, selectedOption, isSubmitted]);
 
-  // Real Firebase Google Sign-In with popup
+  // Real Firebase Google Sign-In with popup & redirect fallback
   const handleGoogleSignIn = async () => {
     setIsSigningIn(true);
+    setAuthError(null);
     try {
       const profile = await signInWithGoogle();
       setFirebaseUser(profile);
@@ -228,9 +252,22 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
       }
     } catch (err: any) {
       if (err?.code !== 'auth/popup-closed-by-user') {
-        alert("Google sign-in could not be completed. You can still enter as Guest!");
+        const diagnostic = getAuthErrorMessage(err);
+        setAuthError(diagnostic);
       }
     } finally {
+      setIsSigningIn(false);
+    }
+  };
+
+  const handleGoogleSignInRedirect = async () => {
+    setIsSigningIn(true);
+    setAuthError(null);
+    try {
+      await signInWithGoogleRedirect();
+    } catch (err: any) {
+      const diagnostic = getAuthErrorMessage(err);
+      setAuthError(diagnostic);
       setIsSigningIn(false);
     }
   };
@@ -239,6 +276,7 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     try {
       await signOutUser();
       setFirebaseUser(null);
+      setAuthError(null);
     } catch (err) {
       console.warn("Sign out failed", err);
     }
@@ -432,6 +470,45 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
                 </svg>
                 <span>{isSigningIn ? 'Connecting to Google...' : 'Sign in with Google'}</span>
               </button>
+            )}
+
+            {authError && (
+              <div className="p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-2xl space-y-2.5 text-xs text-amber-900 dark:text-amber-200 animate-in fade-in">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="font-black text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                    <span>⚠️ {authError.title}</span>
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={() => setAuthError(null)}
+                    className="text-amber-500 hover:text-amber-700 font-bold text-xs"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <p className="text-[11px] leading-relaxed font-medium">{authError.message}</p>
+                {authError.fixStep && (
+                  <div className="p-2.5 bg-amber-100/70 dark:bg-amber-900/40 rounded-xl font-mono text-[10px] text-amber-950 dark:text-amber-100 break-words leading-relaxed">
+                    {authError.fixStep}
+                  </div>
+                )}
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleGoogleSignInRedirect}
+                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl text-[10px] shadow-sm transition-all"
+                  >
+                    Try Redirect Sign-In
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAuthError(null)}
+                    className="px-3 py-1.5 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-[10px] transition-all"
+                  >
+                    Continue as Guest
+                  </button>
+                </div>
+              </div>
             )}
 
             <div className="relative flex py-1 items-center">
