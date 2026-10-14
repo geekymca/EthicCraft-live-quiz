@@ -57,10 +57,11 @@ export const deleteRoom = async (roomCode: string) => {
 
 // Polling Method for Participants (Low Resource Usage)
 export const getRoomState = async (roomCode: string) => {
+  const code = roomCode.trim();
   const { data, error } = await supabase
     .from('rooms')
     .select('*')
-    .eq('room_code', roomCode)
+    .ilike('room_code', code)
     .maybeSingle();
   
   if (error || !data) return null;
@@ -74,10 +75,11 @@ export const getRoomState = async (roomCode: string) => {
 };
 
 export const getParticipantsOnce = async (roomCode: string) => {
+  const code = roomCode.trim();
   const { data, error } = await supabase
     .from('participants')
     .select('*')
-    .eq('room_code', roomCode);
+    .ilike('room_code', code);
   if (error) return [];
   return data;
 };
@@ -231,7 +233,7 @@ export const checkRoomExists = async (roomCode: string) => {
   const { data } = await supabase
     .from('rooms')
     .select('room_code')
-    .eq('room_code', roomCode)
+    .ilike('room_code', roomCode.trim())
     .maybeSingle();
   return !!data;
 };

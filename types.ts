@@ -21,6 +21,8 @@ export interface Participant {
   name: string;
   phoneNumber?: string;
   rollNumber?: string; // backwards compatibility
+  phone_number?: string;
+  roll_number?: string;
   score: number;
   totalTimeTaken: number;
   lastTimeTaken: number; // Time taken for the most recent question

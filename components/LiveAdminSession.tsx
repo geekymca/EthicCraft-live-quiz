@@ -144,8 +144,8 @@ const LiveAdminSession: React.FC<LiveAdminSessionProps> = ({ session: initialSes
         <button onClick={onClose} className="p-3 hover:bg-white/10 rounded-full transition-colors"><X size={28} /></button>
       </header>
 
-      <main className="flex-grow flex items-start justify-center p-8 overflow-y-auto relative bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-900/10 via-slate-950 to-slate-950 scrollbar-hide">
-        <div className="w-full flex flex-col items-center pt-12 md:pt-20 pb-24">
+      <main className="flex-grow flex items-start justify-center p-6 md:p-8 overflow-y-auto relative bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-900/10 via-slate-950 to-slate-950 scrollbar-hide">
+        <div className={`w-full flex flex-col items-center pb-24 ${session.status === SessionStatus.INTERMISSION || session.status === SessionStatus.FINISHED ? 'pt-2 md:pt-4' : 'pt-10 md:pt-16'}`}>
         {session.status === SessionStatus.WAITING && (
           <div className="max-w-6xl w-full flex flex-col items-center gap-12 animate-in fade-in slide-in-from-bottom-12 duration-1000">
             {quiz.isSpecial ? (
@@ -255,8 +255,8 @@ const LiveAdminSession: React.FC<LiveAdminSessionProps> = ({ session: initialSes
         )}
 
         {session.status === SessionStatus.INTERMISSION && (
-          <div className="max-w-4xl w-full space-y-8 animate-in slide-in-from-bottom-12">
-             <ThreeLeaderboardEffect className="w-full h-44" />
+          <div className="max-w-4xl w-full space-y-2 animate-in slide-in-from-bottom-8 -mt-2">
+             <ThreeLeaderboardEffect className="w-full h-24 md:h-28" />
              <div className="text-center">
                 <h2 className="text-4xl md:text-5xl font-black tracking-tight flex items-center justify-center gap-4 uppercase italic">
                   <Medal className="text-amber-500" size={44} />

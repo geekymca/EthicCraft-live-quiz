@@ -8,7 +8,7 @@ interface ThreeLeaderboardEffectProps {
 }
 
 export const ThreeLeaderboardEffect: React.FC<ThreeLeaderboardEffectProps> = ({
-  className = 'w-full h-48 md:h-64 relative flex items-center justify-center my-4',
+  className = 'w-full h-28 relative flex items-center justify-center',
   isGrandFinale = false,
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -48,11 +48,11 @@ export const ThreeLeaderboardEffect: React.FC<ThreeLeaderboardEffectProps> = ({
     if (!container) return;
 
     const width = container.clientWidth || 320;
-    const height = container.clientHeight || 200;
+    const height = container.clientHeight || 160;
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-    camera.position.set(0, 0, 16);
+    camera.position.set(0, 0.2, 13);
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
     renderer.setSize(width, height);

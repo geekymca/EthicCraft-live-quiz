@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Users, Timer, CheckCircle2, XCircle, ArrowLeft, Wifi, Phone, Target, Trophy, Medal, Hash, User, RefreshCw, Check, Lock } from 'lucide-react';
+import { Send, Users, Timer, CheckCircle2, XCircle, ArrowLeft, Wifi, Phone, Target, Trophy, Medal, Hash, User, RefreshCw, Check, Lock, Clock, Sparkles, Zap } from 'lucide-react';
 import { LiveSession, SessionStatus, Participant, Quiz } from '../types';
 import { addParticipantToRoom, updateParticipantInRoom, checkRoomExists, fetchQuizzesFromFirebase, getRoomState, getParticipantsOnce } from '../services/syncService';
 import { calculateRoundPoints, getCorrectAnswerCount, sortLeaderboard } from '../services/scoringService';
@@ -71,37 +71,160 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
   const pollingRef = useRef<any>(null);
   const answerEffectRef = useRef<ThreeAnswerEffectHandle | null>(null);
 
-  // Auto-resume check on initial load
+  // Resumable player detected for the currently entered room code
+  const [resumablePlayer, setResumablePlayer] = useState<any | null>(null);
+
+  // Helper to resume into a session with an existing player record
+  const resumeExistingSession = async (roomData: any, player: any, code: string) => {
+    const cleanCode = code.toUpperCase().trim();
+    setRoomCode(cleanCode);
+    setName(player.name);
+    setPhoneNumber(player.phone_number || player.roll_number || '');
+    setMyParticipantId(player.id);
+    setDisplayScore(player.score);
+    
+    // Lock in submission if already answered current question
+    if (player.answered_question_index === roomData.current_question_index) {
+      setIsSubmitted(true);
+    } else {
+      setIsSubmitted(false);
+      setSelectedOption(null);
+      setSelectionTimeTaken(null);
+    }
+
+    setSession(roomData);
+    if (roomData.quiz_id) {
+      fetchQuizzesFromFirebase().then(dbQuizzes => {
+        const found = dbQuizzes.find((q: any) => q.id === roomData.quiz_id) as Quiz;
+        if (found) setQuiz(found);
+      });
+    }
+
+    getParticipantsOnce(cleanCode).then(list => {
+      const mapped = list.map(p => ({
+        ...p,
+        phoneNumber: p.phone_number || p.roll_number,
+        rollNumber: p.phone_number || p.roll_number,
+        totalTimeTaken: p.total_time_taken,
+        lastTimeTaken: p.last_time_taken,
+        lastAnsweredCorrectly: p.last_answered_correctly,
+        answeredQuestionIndex: p.answered_question_index
+      }));
+      setParticipants(mapped);
+    });
+
+    localStorage.setItem('active_quiz_room', cleanCode);
+    localStorage.setItem('myParticipantId', player.id);
+    localStorage.setItem('participant_profile', JSON.stringify({
+      name: player.name,
+      phoneNumber: player.phone_number || player.roll_number || ''
+    }));
+
+    setIsJoined(true);
+    setRejoinNotice(`Welcome back, ${player.name}! Reconnected to active session.`);
+  };
+
+  // Auto-resume check on initial load (from localStorage)
   useEffect(() => {
     const savedRoom = localStorage.getItem('active_quiz_room');
     const savedId = localStorage.getItem('myParticipantId');
-    if (savedRoom && savedId && !isJoined) {
+    const savedProfile = localStorage.getItem('participant_profile');
+    let savedPhoneDigits = '';
+    if (savedProfile) {
+      try {
+        const parsed = JSON.parse(savedProfile);
+        savedPhoneDigits = (parsed.phoneNumber || parsed.rollNumber || '').replace(/\D/g, '');
+      } catch (e) {}
+    }
+
+    if (savedRoom && !isJoined) {
       getRoomState(savedRoom).then(async (state) => {
-        // Discard session if room does not exist or has finished
-        if (!state || state.status === SessionStatus.FINISHED) {
+        if (!state) {
           localStorage.removeItem('active_quiz_room');
           localStorage.removeItem('myParticipantId');
           return;
         }
 
         const list = await getParticipantsOnce(savedRoom);
-        const found = list.find((p: any) => p.id === savedId);
+        const found = list.find((p: any) => {
+          if (savedId && p.id === savedId) return true;
+          const pPhone = (p.phone_number || p.roll_number || '').replace(/\D/g, '');
+          if (savedPhoneDigits && pPhone) {
+            if (pPhone === savedPhoneDigits) return true;
+            if (pPhone.length >= 6 && savedPhoneDigits.length >= 6 && (pPhone.endsWith(savedPhoneDigits) || savedPhoneDigits.endsWith(pPhone))) return true;
+          }
+          return false;
+        });
+
         if (found) {
-          setRoomCode(savedRoom);
-          setName(found.name);
-          setPhoneNumber(found.phone_number || found.roll_number || '');
-          setMyParticipantId(found.id);
-          setDisplayScore(found.score);
-          setIsJoined(true);
-          setRejoinNotice(`Welcome back, ${found.name}! Reconnected to active session.`);
-        } else {
-          // Stale ID from prior quiz run
-          localStorage.removeItem('active_quiz_room');
-          localStorage.removeItem('myParticipantId');
+          resumeExistingSession(state, found, savedRoom);
         }
       });
     }
   }, []);
+
+  // Detect resumable session whenever user types or enters room code
+  useEffect(() => {
+    const trimmed = roomCode.toUpperCase().trim();
+    if (trimmed.length >= 4 && !isJoined) {
+      let isCurrent = true;
+      getRoomState(trimmed).then(async (state) => {
+        if (!isCurrent) return;
+        if (!state || state.status === SessionStatus.FINISHED) {
+          setResumablePlayer(null);
+          return;
+        }
+
+        const list = await getParticipantsOnce(trimmed);
+        const savedId = localStorage.getItem('myParticipantId');
+        const savedProfile = localStorage.getItem('participant_profile');
+        let savedPhone = '';
+        let savedName = '';
+        if (savedProfile) {
+          try {
+            const p = JSON.parse(savedProfile);
+            savedPhone = (p.phoneNumber || p.rollNumber || '').replace(/\D/g, '');
+            savedName = (p.name || '').trim().toLowerCase();
+          } catch (e) {}
+        }
+        const currentPhone = phoneNumber.replace(/\D/g, '');
+        const currentName = name.trim().toLowerCase();
+
+        const match = list.find((p: any) => {
+          if (savedId && p.id === savedId) return true;
+          const pPhone = (p.phone_number || p.roll_number || '').replace(/\D/g, '');
+          if (pPhone && currentPhone) {
+            if (pPhone === currentPhone) return true;
+            if (pPhone.length >= 6 && currentPhone.length >= 6 && (pPhone.endsWith(currentPhone) || currentPhone.endsWith(pPhone))) return true;
+          }
+          if (pPhone && savedPhone) {
+            if (pPhone === savedPhone) return true;
+            if (pPhone.length >= 6 && savedPhone.length >= 6 && (pPhone.endsWith(savedPhone) || savedPhone.endsWith(pPhone))) return true;
+          }
+          if (currentName && (p.name || '').trim().toLowerCase() === currentName) return true;
+          if (savedName && (p.name || '').trim().toLowerCase() === savedName) return true;
+          return false;
+        });
+
+        if (isCurrent) {
+          if (match) {
+            setResumablePlayer({ player: match, roomState: state });
+            // Auto fill name and phone if empty
+            if (!name) setName(match.name);
+            if (!phoneNumber) setPhoneNumber(match.phone_number || match.roll_number || '');
+          } else {
+            setResumablePlayer(null);
+          }
+        }
+      }).catch(() => {
+        if (isCurrent) setResumablePlayer(null);
+      });
+
+      return () => { isCurrent = false; };
+    } else {
+      setResumablePlayer(null);
+    }
+  }, [roomCode, isJoined, phoneNumber, name]);
 
   // Polling room state
   useEffect(() => {
@@ -194,9 +317,11 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
       if (timerRef.current) clearInterval(timerRef.current);
     }
     
-    // Auto-reset selection on new question index
+    // Auto-reset selection on new question index or maintain locked-in state
     if (session?.status === SessionStatus.ACTIVE) {
-      if (me && me.answeredQuestionIndex !== session.currentQuestionIndex && isSubmitted) {
+      if (me && me.answeredQuestionIndex === session.currentQuestionIndex && !isSubmitted) {
+        setIsSubmitted(true);
+      } else if (me && me.answeredQuestionIndex !== session.currentQuestionIndex && isSubmitted) {
         setSelectedOption(null);
         setSelectionTimeTaken(null);
         setIsSubmitted(false);
@@ -207,15 +332,11 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
   // Join or reconnect to live session using Phone Number as primary key
   const joinSession = async () => {
     const code = roomCode.toUpperCase().trim();
+    if (!code) {
+      return alert("Please enter the Room Code!");
+    }
+
     const cleanPhone = phoneNumber.replace(/[\s\-()]/g, '').trim();
-
-    if (!code || !name.trim() || !cleanPhone) {
-      return alert("Room Code, Name, and Phone Number are required!");
-    }
-
-    if (cleanPhone.length < 6) {
-      return alert("Please enter a valid Phone Number!");
-    }
     
     setIsLoading(true);
     try {
@@ -226,53 +347,109 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
         return;
       }
 
+      // Check if participant already exists in this room by ID, Phone, or Name
+      const existingParticipants = await getParticipantsOnce(code);
+      const storedId = localStorage.getItem('myParticipantId');
+      const savedProfile = localStorage.getItem('participant_profile');
+      let savedPhone = '';
+      let savedName = '';
+      if (savedProfile) {
+        try {
+          const parsed = JSON.parse(savedProfile);
+          savedPhone = (parsed.phoneNumber || parsed.rollNumber || '').replace(/\D/g, '');
+          savedName = (parsed.name || '').trim().toLowerCase();
+        } catch (e) {}
+      }
+      const cleanPhoneDigits = cleanPhone.replace(/\D/g, '');
+      const cleanNameLower = name.trim().toLowerCase();
+
+      const existingPlayer = existingParticipants.find((p: any) => {
+        if (storedId && p.id === storedId) return true;
+        const pPhone = (p.phone_number || p.roll_number || '').replace(/\D/g, '');
+        if (pPhone && cleanPhoneDigits) {
+          if (pPhone === cleanPhoneDigits) return true;
+          if (pPhone.length >= 6 && cleanPhoneDigits.length >= 6 && (pPhone.endsWith(cleanPhoneDigits) || cleanPhoneDigits.endsWith(pPhone))) return true;
+        }
+        if (pPhone && savedPhone) {
+          if (pPhone === savedPhone) return true;
+          if (pPhone.length >= 6 && savedPhone.length >= 6 && (pPhone.endsWith(savedPhone) || savedPhone.endsWith(pPhone))) return true;
+        }
+        if (cleanNameLower && (p.name || '').trim().toLowerCase() === cleanNameLower) return true;
+        if (savedName && (p.name || '').trim().toLowerCase() === savedName) return true;
+        return false;
+      });
+
+      if (existingPlayer) {
+        // Automatically restore and resume active quiz session standing
+        await resumeExistingSession(room, existingPlayer, code);
+        setIsLoading(false);
+        return;
+      }
+
+      // If not existing, require valid Name and Phone for fresh join
+      if (!name.trim() || !cleanPhone) {
+        alert("To join this quiz, please enter your Full Name and Phone Number!");
+        setIsLoading(false);
+        return;
+      }
+
+      if (cleanPhone.length < 6) {
+        alert("Please enter a valid Phone Number!");
+        setIsLoading(false);
+        return;
+      }
+
       if (room.status === SessionStatus.FINISHED) {
         alert("This quiz session has already finished. Please ask the host to start a new quiz.");
         setIsLoading(false);
         return;
       }
 
-      // Check if participant exists in this room by Phone Number (primary key for active quiz)
-      const existingParticipants = await getParticipantsOnce(code);
-      const storedId = localStorage.getItem('myParticipantId');
+      // Register new participant
+      const participantId = Math.random().toString(36).substring(2, 9);
+      const participant: Participant = {
+        id: participantId,
+        name: name.trim(),
+        phoneNumber: cleanPhone,
+        rollNumber: cleanPhone,
+        score: 0,
+        totalTimeTaken: 0,
+        lastTimeTaken: 0,
+        lastAnsweredCorrectly: false,
+        answeredQuestionIndex: -1
+      };
+      await addParticipantToRoom(code, participant);
 
-      const existingPlayer = existingParticipants.find((p: any) => {
-        const pPhone = (p.phone_number || p.roll_number || '').replace(/[\s\-()]/g, '');
-        return (storedId && p.id === storedId) || (pPhone && pPhone === cleanPhone);
-      });
-
-      let participantId: string;
-
-      if (existingPlayer) {
-        // Reconnect to active running quiz session
-        participantId = existingPlayer.id;
-        setName(existingPlayer.name);
-        setPhoneNumber(existingPlayer.phone_number || existingPlayer.roll_number || cleanPhone);
-        setDisplayScore(existingPlayer.score);
-        setRejoinNotice(`Reconnected! Restored active session standing.`);
-      } else {
-        // Register new participant
-        participantId = Math.random().toString(36).substring(2, 9);
-        const participant: Participant = {
-          id: participantId,
-          name: name.trim(),
-          phoneNumber: cleanPhone,
-          rollNumber: cleanPhone,
-          score: 0,
-          totalTimeTaken: 0,
-          lastTimeTaken: 0,
-          lastAnsweredCorrectly: false,
-          answeredQuestionIndex: -1
-        };
-        await addParticipantToRoom(code, participant);
+      // Eagerly set session & participants
+      setRoomCode(code);
+      setSession(room);
+      if (room.quiz_id) {
+        fetchQuizzesFromFirebase().then(dbQuizzes => {
+          const found = dbQuizzes.find((q: any) => q.id === room.quiz_id) as Quiz;
+          if (found) setQuiz(found);
+        });
       }
 
-      // Save to localStorage and state for reconnection during this active quiz
+      const updatedList = await getParticipantsOnce(code);
+      const mapped = updatedList.map(p => ({
+        ...p,
+        phoneNumber: p.phone_number || p.roll_number,
+        rollNumber: p.phone_number || p.roll_number,
+        totalTimeTaken: p.total_time_taken,
+        lastTimeTaken: p.last_time_taken,
+        lastAnsweredCorrectly: p.last_answered_correctly,
+        answeredQuestionIndex: p.answered_question_index
+      }));
+      setParticipants(mapped);
+
       setMyParticipantId(participantId);
       localStorage.setItem('myParticipantId', participantId);
       localStorage.setItem('active_quiz_room', code);
       localStorage.setItem('participant_profile', JSON.stringify({ name: name.trim(), phoneNumber: cleanPhone }));
 
+      setIsSubmitted(false);
+      setSelectedOption(null);
+      setSelectionTimeTaken(null);
       setIsJoined(true);
     } catch (error) {
       console.error("Join error:", error);
@@ -402,6 +579,30 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
               <p className="text-[10px] text-slate-400 ml-3">Used as unique identifier to reconnect if disconnected</p>
             </div>
 
+            {/* Active Resumable Session Banner */}
+            {resumablePlayer && (
+              <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border-2 border-emerald-500/40 rounded-2xl flex items-center justify-between gap-3 shadow-md animate-in slide-in-from-top-2">
+                <div className="space-y-0.5 text-left">
+                  <div className="flex items-center gap-1.5 text-xs font-black text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">
+                    <Sparkles size={14} /> Active Session Found!
+                  </div>
+                  <div className="font-black text-slate-900 dark:text-white text-sm">
+                    {resumablePlayer.player.name}
+                  </div>
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold">
+                    {getCorrectAnswerCount(resumablePlayer.player.score)} Correct Answers • Standing Restored
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => resumeExistingSession(resumablePlayer.roomState, resumablePlayer.player, roomCode)}
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black uppercase tracking-wider shadow-md active:scale-95 transition-all flex items-center gap-1.5 shrink-0"
+                >
+                  <Zap size={14} /> Resume
+                </button>
+              </div>
+            )}
+
             <button 
               onClick={joinSession} 
               disabled={isLoading} 
@@ -411,6 +612,11 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
                 <>
                   <RefreshCw className="animate-spin" size={20} />
                   <span>SYNCING ARENA...</span>
+                </>
+              ) : resumablePlayer ? (
+                <>
+                  <span>RESUME ACTIVE SESSION</span>
+                  <Zap size={20} />
                 </>
               ) : (
                 <>
@@ -591,41 +797,72 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
           )}
 
           {/* REVEAL PHASE */}
-          {session.status === SessionStatus.REVEAL && currentQuestion && (
-            <div className="flex-grow flex flex-col items-center justify-center text-center space-y-8 py-10">
-              <div className={`w-32 h-32 ${me?.lastAnsweredCorrectly ? 'bg-emerald-500 shadow-emerald-500/30' : 'bg-red-500 shadow-red-500/30'} rounded-full flex items-center justify-center text-white mx-auto shadow-2xl animate-in zoom-in`}>
-                {me?.lastAnsweredCorrectly ? <Target size={64} /> : <XCircle size={64} />}
-              </div>
+          {session.status === SessionStatus.REVEAL && currentQuestion && (() => {
+            const didSubmitThisRound = (me && me.answeredQuestionIndex === session.currentQuestionIndex) || (isSubmitted && selectedOption !== null);
+            const isAnswerCorrect = didSubmitThisRound && (
+              (me && me.answeredQuestionIndex === session.currentQuestionIndex)
+                ? !!me.lastAnsweredCorrectly
+                : (selectedOption === currentQuestion.correctAnswer)
+            );
+            const isNotAnswered = !didSubmitThisRound;
 
-              <div className="space-y-1">
-                <span className="text-xs font-black uppercase tracking-widest text-slate-400">
-                  {me?.lastAnsweredCorrectly ? 'Glorious! Correct Answer' : 'Incorrect choice'}
-                </span>
-                <h3 className="text-2xl font-black text-slate-900 dark:text-white">
-                  {me?.lastAnsweredCorrectly ? '+ 1 Wisdom Point Earned' : '+ 0 Points'}
-                </h3>
-              </div>
+            return (
+              <div className="flex-grow flex flex-col items-center justify-center text-center space-y-6 py-6">
+                {isNotAnswered ? (
+                  <div className="w-28 h-28 bg-amber-500/15 border-4 border-amber-500/30 text-amber-500 rounded-full flex items-center justify-center mx-auto shadow-xl animate-in zoom-in">
+                    <Clock size={52} />
+                  </div>
+                ) : isAnswerCorrect ? (
+                  <div className="w-28 h-28 bg-emerald-500 shadow-emerald-500/30 rounded-full flex items-center justify-center text-white mx-auto shadow-2xl animate-in zoom-in">
+                    <Target size={56} />
+                  </div>
+                ) : (
+                  <div className="w-28 h-28 bg-red-500 shadow-red-500/30 rounded-full flex items-center justify-center text-white mx-auto shadow-2xl animate-in zoom-in">
+                    <XCircle size={56} />
+                  </div>
+                )}
 
-              <div className="w-full space-y-3">
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Correct Answer:</div>
-                <div className="p-5 bg-emerald-500/10 border-2 border-emerald-500/30 text-emerald-600 dark:text-emerald-400 rounded-2xl font-black text-lg">
-                  {String.fromCharCode(65 + currentQuestion.correctAnswer)}. {currentQuestion.options[currentQuestion.correctAnswer]}
+                <div className="space-y-1">
+                  <span className={`text-xs font-black uppercase tracking-widest ${
+                    isNotAnswered ? 'text-amber-500' : isAnswerCorrect ? 'text-emerald-500' : 'text-red-500'
+                  }`}>
+                    {isNotAnswered ? 'Time Expired · Not Answered' : isAnswerCorrect ? 'Glorious! Correct Answer' : 'Incorrect Choice'}
+                  </span>
+                  <h3 className="text-2xl font-black text-slate-900 dark:text-white">
+                    {isAnswerCorrect ? '+ 1 Wisdom Point Earned' : '+ 0 Points'}
+                  </h3>
+                  {isNotAnswered ? (
+                    <p className="text-xs text-slate-400 font-medium">
+                      No option was submitted before time ran out
+                    </p>
+                  ) : !isAnswerCorrect && selectedOption !== null && currentQuestion.options[selectedOption] ? (
+                    <p className="text-xs text-slate-400 font-medium">
+                      You chose {String.fromCharCode(65 + selectedOption)}. {currentQuestion.options[selectedOption]}
+                    </p>
+                  ) : null}
                 </div>
-              </div>
 
-              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest animate-pulse">
-                Host is transitioning to standings...
-              </p>
-            </div>
-          )}
+                <div className="w-full space-y-2">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Correct Answer:</div>
+                  <div className="p-4 bg-emerald-500/10 border-2 border-emerald-500/30 text-emerald-600 dark:text-emerald-400 rounded-2xl font-black text-lg">
+                    {String.fromCharCode(65 + currentQuestion.correctAnswer)}. {currentQuestion.options[currentQuestion.correctAnswer]}
+                  </div>
+                </div>
+
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest animate-pulse">
+                  Host is transitioning to standings...
+                </p>
+              </div>
+            );
+          })()}
 
           {/* INTERMISSION / LEADERBOARD */}
           {session.status === SessionStatus.INTERMISSION && (
-            <div className="space-y-6 animate-in slide-in-from-bottom-8 py-6">
+            <div className="space-y-3 animate-in slide-in-from-bottom-8 pt-0 pb-6 -mt-2">
               {/* 3D Trophy and celebration visual */}
-              <ThreeLeaderboardEffect isGrandFinale={false} className="w-full h-40" />
+              <ThreeLeaderboardEffect isGrandFinale={false} className="w-full h-24 -mt-2" />
 
-              <div className="text-center space-y-1">
+              <div className="text-center space-y-0.5">
                 <span className="text-xs font-black text-indigo-500 uppercase tracking-widest">Intermission Standings</span>
                 <h3 className="text-3xl font-black text-slate-900 dark:text-white">Current Leaderboard</h3>
               </div>
@@ -662,8 +899,8 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
 
           {/* FINISHED / HALL OF FAME */}
           {session.status === SessionStatus.FINISHED && (
-            <div className="flex-grow flex flex-col items-center justify-center text-center space-y-8 py-8 animate-in zoom-in">
-              <ThreeLeaderboardEffect isGrandFinale={true} className="w-full h-48" />
+            <div className="flex-grow flex flex-col items-center justify-center text-center space-y-4 pt-1 pb-8 animate-in zoom-in -mt-2">
+              <ThreeLeaderboardEffect isGrandFinale={true} className="w-full h-32 -mt-2" />
 
               <div className="space-y-1">
                 <span className="text-xs font-black text-indigo-500 uppercase tracking-widest">Arena Concluded</span>
