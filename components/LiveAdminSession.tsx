@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { X, ArrowRight, Users, Trophy, Timer, Zap, ZapOff, Wifi, Clock, Medal, CheckCircle2, StopCircle, ShieldCheck } from 'lucide-react';
 import { LiveSession, Quiz, SessionStatus, Participant } from '../types';
-import { syncSession, syncParticipants, updateRoomState } from '../services/syncService';
+import { syncSession, syncParticipants, updateRoomState, broadcastRoomState } from '../services/syncService';
 import { sortLeaderboard, getCorrectAnswerCount, formatScoreSummary } from '../services/scoringService';
 import ThreeLeaderboardEffect from './ThreeLeaderboardEffect';
 import { getBaseUrl, getDisplayDomain, getRoomJoinUrl } from '../utils/urlHelper';
@@ -60,6 +60,11 @@ const LiveAdminSession: React.FC<LiveAdminSessionProps> = ({ session: initialSes
       }, 1000);
     } else if (timeLeft === 0 && session.status === SessionStatus.ACTIVE) {
       updateRoomState(session.roomCode, { status: SessionStatus.REVEAL });
+      broadcastRoomState(session.roomCode, {
+        status: SessionStatus.REVEAL,
+        currentQuestionIndex: session.currentQuestionIndex,
+        startTime: session.startTime
+      });
     }
     return () => { if (timerIntervalRef.current) clearInterval(timerIntervalRef.current); };
   }, [timeLeft, session.status]);
@@ -90,24 +95,44 @@ const LiveAdminSession: React.FC<LiveAdminSessionProps> = ({ session: initialSes
 
   const showLeaderboard = async () => {
     const isLast = session.currentQuestionIndex === quiz.questions.length - 1;
-    if (isLast) {
-      await updateRoomState(session.roomCode, { status: SessionStatus.FINISHED });
-    } else {
-      await updateRoomState(session.roomCode, { status: SessionStatus.INTERMISSION });
-    }
+    const nextStatus = isLast ? SessionStatus.FINISHED : SessionStatus.INTERMISSION;
+    
+    // Broadcast computed top standings snapshot to eliminate 300 participant DB queries
+    const sorted = sortLeaderboard(participants);
+    const leaderboardSnapshot = sorted.slice(0, 30).map(p => ({
+      id: p.id,
+      name: p.name,
+      score: p.score,
+      totalTimeTaken: p.totalTimeTaken,
+      phoneNumber: p.phoneNumber || p.rollNumber
+    }));
+
+    await updateRoomState(session.roomCode, { status: nextStatus });
+    await broadcastRoomState(session.roomCode, {
+      status: nextStatus,
+      currentQuestionIndex: session.currentQuestionIndex,
+      startTime: session.startTime,
+      leaderboardSnapshot
+    });
   };
 
   const startNextQuestion = async () => {
     let nextIdx = session.status === SessionStatus.WAITING ? 0 : session.currentQuestionIndex + 1;
     if (nextIdx >= quiz.questions.length) {
-      await updateRoomState(session.roomCode, { status: SessionStatus.FINISHED });
+      await showLeaderboard();
     } else {
       const question = quiz.questions[nextIdx];
+      const now = Date.now();
       setTimeLeft(question.timeLimit);
       await updateRoomState(session.roomCode, { 
         status: SessionStatus.ACTIVE, 
         currentQuestionIndex: nextIdx,
-        startTime: Date.now() 
+        startTime: now 
+      });
+      await broadcastRoomState(session.roomCode, {
+        status: SessionStatus.ACTIVE,
+        currentQuestionIndex: nextIdx,
+        startTime: now
       });
     }
   };

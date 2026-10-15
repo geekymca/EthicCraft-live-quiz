@@ -55,13 +55,13 @@ export const deleteRoom = async (roomCode: string) => {
   if (error) throw error;
 };
 
-// Polling Method for Participants (Low Resource Usage)
+// Optimized Room State Fetch (Exact indexed match, lean column selection)
 export const getRoomState = async (roomCode: string) => {
-  const code = roomCode.trim();
+  const code = roomCode.toUpperCase().trim();
   const { data, error } = await supabase
     .from('rooms')
-    .select('*')
-    .ilike('room_code', code)
+    .select('room_code, quiz_id, status, current_question_index, start_time')
+    .eq('room_code', code)
     .maybeSingle();
   
   if (error || !data) return null;
@@ -75,24 +75,24 @@ export const getRoomState = async (roomCode: string) => {
 };
 
 export const getParticipantsOnce = async (roomCode: string) => {
-  const code = roomCode.trim();
+  const code = roomCode.toUpperCase().trim();
   const { data, error } = await supabase
     .from('participants')
-    .select('*')
-    .ilike('room_code', code);
+    .select('id, room_code, name, phone_number, roll_number, score, total_time_taken, last_time_taken, last_answered_correctly, answered_question_index')
+    .eq('room_code', code);
   if (error) return [];
   return data;
 };
 
 export const syncAllRooms = (callback: (rooms: any[]) => void) => {
-  supabase.from('rooms').select('*').then(({ data }) => {
+  supabase.from('rooms').select('room_code, quiz_id, status, current_question_index, start_time').then(({ data }) => {
     if (data) callback(data.map(r => ({ ...r, roomCode: r.room_code, quizId: r.quiz_id })));
   });
 
   const subscription = supabase
     .channel('all-rooms')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, async () => {
-      const { data } = await supabase.from('rooms').select('*');
+      const { data } = await supabase.from('rooms').select('room_code, quiz_id, status, current_question_index, start_time');
       if (data) callback(data.map(r => ({ ...r, roomCode: r.room_code, quizId: r.quiz_id })));
     })
     .subscribe();
@@ -100,8 +100,30 @@ export const syncAllRooms = (callback: (rooms: any[]) => void) => {
   return () => { supabase.removeChannel(subscription); };
 };
 
-export const syncSession = (roomCode: string, callback: (data: any) => void) => {
-  supabase.from('rooms').select('*').eq('room_code', roomCode).single().then(({ data }) => {
+// Realtime Broadcast sender for Host (Instantly pushes updates to 300+ connected clients without DB read amplification)
+export const broadcastRoomState = async (roomCode: string, payload: any) => {
+  const code = roomCode.toUpperCase().trim();
+  const channel = supabase.channel(`room-${code}`);
+  await channel.send({
+    type: 'broadcast',
+    event: 'room_state',
+    payload: {
+      ...payload,
+      roomCode: code
+    }
+  });
+};
+
+// Realtime Room Sync with Broadcast + Postgres Changes + Connection Health Monitor
+export const syncSession = (
+  roomCode: string, 
+  callback: (data: any) => void,
+  onStatusChange?: (status: 'SUBSCRIBED' | 'DISCONNECTED') => void
+) => {
+  const code = roomCode.toUpperCase().trim();
+
+  // Initial single-row fetch
+  supabase.from('rooms').select('room_code, quiz_id, status, current_question_index, start_time').eq('room_code', code).maybeSingle().then(({ data }) => {
     if (data) callback({
       ...data,
       roomCode: data.room_code,
@@ -111,13 +133,19 @@ export const syncSession = (roomCode: string, callback: (data: any) => void) => 
     });
   });
 
-  const subscription = supabase
-    .channel(`room-${roomCode}`)
+  const channel = supabase.channel(`room-${code}`);
+  
+  channel
+    .on('broadcast', { event: 'room_state' }, (payload) => {
+      if (payload?.payload) {
+        callback(payload.payload);
+      }
+    })
     .on('postgres_changes', { 
       event: 'UPDATE', 
       schema: 'public', 
       table: 'rooms',
-      filter: `room_code=eq.${roomCode}`
+      filter: `room_code=eq.${code}`
     }, (payload) => {
       const data = payload.new;
       callback({
@@ -128,9 +156,15 @@ export const syncSession = (roomCode: string, callback: (data: any) => void) => 
         startTime: data.start_time
       });
     })
-    .subscribe();
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        if (onStatusChange) onStatusChange('SUBSCRIBED');
+      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        if (onStatusChange) onStatusChange('DISCONNECTED');
+      }
+    });
 
-  return () => { supabase.removeChannel(subscription); };
+  return () => { supabase.removeChannel(channel); };
 };
 
 export const syncParticipants = (roomCode: string, callback: (participants: any[]) => void) => {
@@ -138,6 +172,7 @@ export const syncParticipants = (roomCode: string, callback: (participants: any[
     if (data) callback(data);
   });
 
+  let refreshTimer: any = null;
   const subscription = supabase
     .channel(`participants-${roomCode}`)
     .on('postgres_changes', { 
@@ -145,13 +180,20 @@ export const syncParticipants = (roomCode: string, callback: (participants: any[
       schema: 'public', 
       table: 'participants',
       filter: `room_code=eq.${roomCode}`
-    }, async () => {
-      const { data } = await supabase.from('participants').select('*').eq('room_code', roomCode);
-      if (data) callback(data);
+    }, () => {
+      // Throttle participant refetches by 300ms to coalesce burst updates
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(async () => {
+        const { data } = await supabase.from('participants').select('*').eq('room_code', roomCode);
+        if (data) callback(data);
+      }, 300);
     })
     .subscribe();
 
-  return () => { supabase.removeChannel(subscription); };
+  return () => { 
+    if (refreshTimer) clearTimeout(refreshTimer);
+    supabase.removeChannel(subscription); 
+  };
 };
 
 export const updateRoomState = async (roomCode: string, updates: any) => {
@@ -179,6 +221,7 @@ export const addParticipantToRoom = async (roomCode: string, participant: any) =
     room_code: roomCode,
     name: participant.name,
     roll_number: phoneVal,
+    phone_number: phoneVal,
     score: participant.score,
     total_time_taken: participant.totalTimeTaken,
     last_time_taken: participant.lastTimeTaken,
@@ -186,31 +229,12 @@ export const addParticipantToRoom = async (roomCode: string, participant: any) =
     answered_question_index: participant.answeredQuestionIndex
   };
 
-  // 1. Try upsert on (room_code, phone_number) if unique constraint exists
-  try {
-    const { error } = await supabase.from('participants').upsert(
-      { ...payload, phone_number: phoneVal },
-      { onConflict: 'room_code,phone_number' }
-    );
-    if (!error) return;
-  } catch (e) {
-    // Composite conflict target might not be recognized yet
+  // Upsert cleanly on primary key 'id' to eliminate Postgres constraint error log spam
+  const { error } = await supabase.from('participants').upsert(payload, { onConflict: 'id' });
+  if (error && error.message?.includes('phone_number')) {
+    delete payload.phone_number;
+    await supabase.from('participants').upsert(payload, { onConflict: 'id' });
   }
-
-  // 2. Try insert with phone_number
-  try {
-    const { error } = await supabase.from('participants').insert({
-      ...payload,
-      phone_number: phoneVal
-    });
-    if (!error) return;
-  } catch (e) {
-    // Column phone_number might not exist yet
-  }
-
-  // 3. Fallback to basic insert with roll_number
-  const { error } = await supabase.from('participants').insert(payload);
-  if (error && !error.message?.includes('duplicate key')) throw error;
 };
 
 export const updateParticipantInRoom = async (roomCode: string, participantId: string, updates: any) => {

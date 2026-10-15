@@ -46,4 +46,5 @@ export interface LiveSession {
   currentQuestionIndex: number;
   startTime: number | null;
   participants: Participant[];
+  leaderboardSnapshot?: any[];
 }

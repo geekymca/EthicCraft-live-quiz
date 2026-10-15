@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, Users, Timer, CheckCircle2, XCircle, ArrowLeft, Wifi, Phone, Target, Trophy, Medal, Hash, User, RefreshCw, Check, Lock, Clock, Sparkles, Zap } from 'lucide-react';
 import { LiveSession, SessionStatus, Participant, Quiz } from '../types';
-import { addParticipantToRoom, updateParticipantInRoom, checkRoomExists, fetchQuizzesFromFirebase, getRoomState, getParticipantsOnce } from '../services/syncService';
+import { addParticipantToRoom, updateParticipantInRoom, checkRoomExists, fetchQuizzesFromFirebase, getRoomState, getParticipantsOnce, syncSession } from '../services/syncService';
 import { calculateRoundPoints, getCorrectAnswerCount, sortLeaderboard } from '../services/scoringService';
 import ThreeAnswerEffect, { ThreeAnswerEffectHandle } from './ThreeAnswerEffect';
 import ThreeLeaderboardEffect from './ThreeLeaderboardEffect';
@@ -73,6 +73,7 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
 
   // Resumable player detected for the currently entered room code
   const [resumablePlayer, setResumablePlayer] = useState<any | null>(null);
+  const [broadcastLeaderboard, setBroadcastLeaderboard] = useState<any[] | null>(null);
 
   // Helper to resume into a session with an existing player record
   const resumeExistingSession = async (roomData: any, player: any, code: string) => {
@@ -163,11 +164,16 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     }
   }, []);
 
-  // Detect resumable session whenever user types or enters room code
+  // Detect resumable session whenever user types room code (debounced by 350ms to prevent query spam)
   useEffect(() => {
     const trimmed = roomCode.toUpperCase().trim();
-    if (trimmed.length >= 4 && !isJoined) {
-      let isCurrent = true;
+    if (trimmed.length < 4 || isJoined) {
+      setResumablePlayer(null);
+      return;
+    }
+
+    let isCurrent = true;
+    const timer = setTimeout(() => {
       getRoomState(trimmed).then(async (state) => {
         if (!isCurrent) return;
         if (!state || state.status === SessionStatus.FINISHED) {
@@ -209,7 +215,6 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
         if (isCurrent) {
           if (match) {
             setResumablePlayer({ player: match, roomState: state });
-            // Auto fill name and phone if empty
             if (!name) setName(match.name);
             if (!phoneNumber) setPhoneNumber(match.phone_number || match.roll_number || '');
           } else {
@@ -219,54 +224,86 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
       }).catch(() => {
         if (isCurrent) setResumablePlayer(null);
       });
+    }, 350);
 
-      return () => { isCurrent = false; };
-    } else {
-      setResumablePlayer(null);
-    }
+    return () => {
+      isCurrent = false;
+      clearTimeout(timer);
+    };
   }, [roomCode, isJoined, phoneNumber, name]);
 
-  // Polling room state
+  // Real-time room state sync via WebSockets + Broadcast (with jittered fallback for 200+ connection cap)
   useEffect(() => {
     if (isJoined && roomCode) {
-      const poll = async () => {
-        try {
-          const newState = await getRoomState(roomCode);
-          if (newState) {
-            setSession(prev => {
-              const shouldFetchParticipants = !prev || 
-                prev.status !== newState.status || 
-                prev.currentQuestionIndex !== newState.currentQuestionIndex;
-
-              if (shouldFetchParticipants) {
-                getParticipantsOnce(roomCode).then(list => {
-                  const mapped = list.map(p => ({
-                    ...p,
-                    phoneNumber: p.phone_number || p.roll_number,
-                    rollNumber: p.phone_number || p.roll_number,
-                    totalTimeTaken: p.total_time_taken,
-                    lastTimeTaken: p.last_time_taken,
-                    lastAnsweredCorrectly: p.last_answered_correctly,
-                    answeredQuestionIndex: p.answered_question_index
-                  }));
-                  setParticipants(mapped);
-                });
-              }
-              return { ...prev, ...newState };
-            });
-            setIsConnected(true);
+      // 1. Real-time WebSocket listener with Broadcast and connection status monitor
+      const unsub = syncSession(
+        roomCode, 
+        (newState) => {
+          if (!newState) return;
+          if (newState.leaderboardSnapshot && Array.isArray(newState.leaderboardSnapshot)) {
+            setBroadcastLeaderboard(newState.leaderboardSnapshot);
           }
-        } catch (e) {
-          setIsConnected(false);
+          setSession(prev => {
+            const shouldFetchParticipants = !prev || 
+              prev.status !== newState.status || 
+              prev.currentQuestionIndex !== newState.currentQuestionIndex;
+
+            // Only fetch full participant list if we don't have a broadcast snapshot
+            if (shouldFetchParticipants && (!newState.leaderboardSnapshot || newState.leaderboardSnapshot.length === 0)) {
+              getParticipantsOnce(roomCode).then(list => {
+                const mapped = list.map(p => ({
+                  ...p,
+                  phoneNumber: p.phone_number || p.roll_number,
+                  rollNumber: p.phone_number || p.roll_number,
+                  totalTimeTaken: p.total_time_taken,
+                  lastTimeTaken: p.last_time_taken,
+                  lastAnsweredCorrectly: p.last_answered_correctly,
+                  answeredQuestionIndex: p.answered_question_index
+                }));
+                setParticipants(mapped);
+              });
+            }
+            return { ...prev, ...newState };
+          });
+          setIsConnected(true);
+        },
+        (status) => {
+          setIsConnected(status === 'SUBSCRIBED');
         }
+      );
+
+      // 2. Jittered fallback polling (active if websocket dropped or participant count exceeds 200)
+      let timeoutId: any = null;
+      let isMounted = true;
+
+      const scheduleNextPoll = () => {
+        if (!isMounted) return;
+        // If connected, check gently every 15s. If disconnected (e.g. over 200-cap), poll every 3-4.5s with jitter
+        const delay = isConnected ? 15000 : (3000 + Math.random() * 1500);
+        
+        timeoutId = setTimeout(async () => {
+          if (!isMounted) return;
+          if (typeof document === 'undefined' || !document.hidden) {
+            try {
+              const state = await getRoomState(roomCode);
+              if (state && isMounted) {
+                setSession(prev => ({ ...prev, ...state }));
+              }
+            } catch (e) {}
+          }
+          scheduleNextPoll();
+        }, delay);
       };
 
-      poll();
-      pollingRef.current = setInterval(poll, 1200);
+      scheduleNextPoll();
 
-      return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
+      return () => {
+        isMounted = false;
+        unsub();
+        if (timeoutId) clearTimeout(timeoutId);
+      };
     }
-  }, [isJoined, roomCode]);
+  }, [isJoined, roomCode, isConnected]);
 
   // Load quiz details
   useEffect(() => {
@@ -474,8 +511,11 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
       answerEffectRef.current.triggerBurst(event.clientX, event.clientY, 0x6366f1);
     }
 
-    // Immediately submit to database
-    finalizeSubmitAnswer(idx, elapsed);
+    // Micro-stagger database write with 0-200ms randomized jitter to smooth out 300 concurrent submissions
+    const jitterMs = Math.floor(Math.random() * 200);
+    setTimeout(() => {
+      finalizeSubmitAnswer(idx, elapsed);
+    }, jitterMs);
   };
 
   // Finalize answer submission to database
@@ -659,7 +699,9 @@ const ParticipantView: React.FC<ParticipantViewProps> = ({ onExit, themeToggle }
     (name && p.name === name)
   );
   const activeMyId = me ? me.id : myId;
-  const sortedParticipants = sortLeaderboard(participants);
+  const sortedParticipants = broadcastLeaderboard && broadcastLeaderboard.length > 0 
+    ? broadcastLeaderboard 
+    : sortLeaderboard(participants);
   const myRank = activeMyId ? Math.max(1, sortedParticipants.findIndex(p => p.id === activeMyId) + 1) : (sortedParticipants.length > 0 ? 1 : '--');
   const currentQuestion = quiz.questions[session.currentQuestionIndex];
   const myCorrectCount = me ? getCorrectAnswerCount(me.score) : getCorrectAnswerCount(displayScore);
